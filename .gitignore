@@ -23,3 +23,6 @@ test-models/
 test-voices/
 # macOS
 .DS_Store
+# Claude Code: your own settings, and its worktrees (copies of the repo)
+.claude/settings.local.json
+.claude/worktrees/
