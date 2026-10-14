@@ -29,6 +29,7 @@ SKIP_DIRS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".git
              "certs", "clips", "models", "test-models", "test-voices"}
 SKIP_PATHS = {Path("tests/data"), Path("config/inputs.json"), STAMP}
 SKIP_SUFFIXES = {".pyc", ".pyo", ".wav", ".zip", ".env"}   # *.env hold tokens; *.env.example ship
+SKIP_NAMES = {".DS_Store"}                                  # Finder leaves these in folders on a Mac
 
 
 def released_files(root: Path = ROOT) -> List[Path]:
@@ -41,7 +42,7 @@ def released_files(root: Path = ROOT) -> List[Path]:
                        and here / d not in SKIP_PATHS]
         for name in filenames:
             rel = here / name
-            if rel not in SKIP_PATHS and rel.suffix not in SKIP_SUFFIXES:
+            if rel not in SKIP_PATHS and rel.suffix not in SKIP_SUFFIXES and name not in SKIP_NAMES:
                 found.append(rel)
     return sorted(found, key=lambda p: p.as_posix())
 

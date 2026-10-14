@@ -7,12 +7,19 @@ models/
 clips/
 # written by tools/make_release.py
 x100/_build.py
+*.zip
+dist/
 # python
 __pycache__/
 *.pyc
-.venv/
+.venv*/
 *.egg-info/
 build/
 .pytest_cache/
-tests/data/
 .ruff_cache/
+# test assets (tests/README.md)
+tests/data/
+test-models/
+test-voices/
+# macOS
+.DS_Store

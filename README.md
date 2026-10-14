@@ -405,7 +405,7 @@ Dockerfile, docker-compose.yml    the bridge in Docker, for the LAN layout
 ## Tests
 
 ```bash
-pip install -e '.[test]' numpy scipy
+pip install -e '.[test]' numpy scipy     # Python 3.10 or later (see tests/README.md for 3.9)
 pytest
 ```
 

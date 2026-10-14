@@ -81,6 +81,8 @@ def make_tree(root: Path) -> None:
         "tests/data/e2e-cache/clip.wav": "RIFF",
         "x100_control.egg-info/PKG-INFO": "meta\n",
         ".venv311/bin/python": "",
+        ".DS_Store": "finder",
+        "x100/.DS_Store": "finder",
         "build/lib/x100/__init__.py": "",
         "models/hey_jarvis.onnx": "",
         ".gitignore": "x100/_build.py\n",
