@@ -120,16 +120,21 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 
 ## Releasing to the Pi
 
-- **Build:** `python3 tools/make_release.py` writes `../x100-control.zip`. The zip is stamped with a
-  build ID, a hash of the released files, which `x100ctl --version` and the service logs show.
-  Build from a clean, committed tree. Once Nick installs a build, tag its commit `build-<id>`.
-- **Install,** from Nick's Mac:
+- **Build:** `python3 tools/make_release.py` writes `x100-control.zip` in the folder above the repo.
+  On Nick's Mac the repo is `~/Projects/x100-control`, so the zip is `~/Projects/x100-control.zip`.
+  - The zip is stamped with a build ID, a hash of the released files. `x100ctl --version` and the
+    service logs show it.
+  - Build from a clean, committed tree.
+  - Once Nick installs a build, tag its commit `build-<id>`.
+- **Install,** from the repo folder on Nick's Mac:
 
-      cd ~ && scp x100-control.zip x100-controller@x100-pi.local:
+      scp ../x100-control.zip x100-controller@x100-pi.local:
       ssh x100-controller@x100-pi.local
       rm -rf x100-control && unzip -q x100-control.zip && cd x100-control && sudo deploy/install.sh
 
-  `install.sh` keeps bridge.env, listener.env, config/, models and clips.
+  - `install.sh` keeps bridge.env, listener.env, config/, models and clips.
+  - It ends by printing the installed build ID. Check that it matches the one make_release printed.
+  - Older zips from before the move may still be in Nick's home folder. Never send those.
 - **Install over SSH:** if Nick has put his SSH key on the Pi, these steps can run as
   `ssh x100-controller@x100-pi.local '...'`. That works only if `sudo -n true` succeeds there.
   Otherwise, ask him to run `install.sh` himself.
