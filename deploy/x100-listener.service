@@ -1,0 +1,32 @@
+# systemd unit for the voice listener. deploy/install.sh installs it.
+#   journalctl -u x100-listener -f        # watch it
+[Unit]
+Description=X100-4K voice listener (wake word and commands)
+After=network-online.target sound.target x100-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=x100
+Group=x100
+SupplementaryGroups=audio
+WorkingDirectory=/opt/x100-control
+ExecStart=/opt/x100-control/.venv/bin/x100-listener --env-file /opt/x100-control/listener.env
+Restart=always
+RestartSec=3
+# Audio first: on a Pi 3 this keeps other jobs from delaying the 80 ms frames.
+Nice=-5
+# Nothing leaves the house: no onnxruntime telemetry, and the listener may only talk to
+# this machine and private (LAN) addresses -- the bridge is one of them. If your LAN uses
+# other addresses, add them to IPAddressAllow.
+Environment=ORT_DISABLE_TELEMETRY=1
+IPAddressDeny=any
+IPAddressAllow=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 fc00::/7
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=-/opt/x100-control/clips
+
+[Install]
+WantedBy=multi-user.target

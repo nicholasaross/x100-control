@@ -1,0 +1,30 @@
+# systemd unit for the bridge (the one program that talks to the projector).
+# deploy/install.sh installs it: with no options on the Pi that does everything, or with --bridge.
+#   journalctl -u x100-bridge -f          # watch it
+[Unit]
+Description=ViewSonic X100-4K control bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=x100
+Group=x100
+# The USB serial adapter (/dev/ttyUSB*) belongs to the dialout group.
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/x100-control
+ExecStart=/opt/x100-control/.venv/bin/x100-bridge --env-file /opt/x100-control/bridge.env
+Restart=always
+RestartSec=5
+# Local network only. The optional Alexa link needs to reach AWS: `install.sh --alexa`
+# adds a drop-in (x100-bridge.service.d/alexa.conf) that lifts this.
+IPAddressDeny=any
+IPAddressAllow=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 fc00::/7
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=-/opt/x100-control/config
+
+[Install]
+WantedBy=multi-user.target

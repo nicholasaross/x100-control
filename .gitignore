@@ -1,0 +1,18 @@
+# secrets and per-install state
+certs/
+bridge.env
+listener.env
+config/inputs.json
+models/
+clips/
+# written by tools/make_release.py
+x100/_build.py
+# python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+.pytest_cache/
+tests/data/
+.ruff_cache/

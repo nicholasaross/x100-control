@@ -1,0 +1,12 @@
+certs/
+bridge.env
+listener.env
+config/
+models/
+clips/
+tests/
+alexa/
+.git/
+.venv/
+**/__pycache__/
+*.pyc

@@ -1,0 +1,29 @@
+# docker compose up -d --build    start the bridge (restarts with the machine)
+# docker compose logs -f          watch it
+# docker compose run --rm --entrypoint x100ctl x100-bridge probe     diagnostics
+services:
+  x100-bridge:
+    build:
+      context: .
+      args:
+        EXTRAS: ""                # "aws" for the optional Alexa link (alexa/README.md)
+    image: x100-bridge:latest
+    restart: unless-stopped
+    network_mode: host            # reach the projector, and let the Pi reach the local API (port 8661)
+    # Run as the user who owns config/ (`id -u` / `id -g`).
+    user: "${BRIDGE_UID:-1000}:${BRIDGE_GID:-1000}"
+    env_file: bridge.env
+    environment:                  # container paths override the ones in bridge.env
+      X100_INPUTS_FILE: /config/inputs.json
+      # Alexa link only:
+      # CERT_FILE: /certs/bridge.crt
+      # KEY_FILE: /certs/bridge.key
+      # CA_FILE: /certs/AmazonRootCA1.pem
+    volumes:
+      - ./config:/config
+      # - ./certs:/certs:ro       # Alexa link only
+    # RS-232 instead of LAN? Uncomment, and set X100_SERIAL=/dev/ttyUSB0 in bridge.env
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+    # group_add:
+    #   - dialout

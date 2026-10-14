@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x100-control"
+dynamic = ["version"]   # from x100/__init__.py, so there's one place to change it
+description = "Local voice control for the ViewSonic X100-4K projector: a wake-word listener and a LAN bridge, no cloud"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["pyserial>=3.5"]
+
+[project.optional-dependencies]
+# The voice listener (the Raspberry Pi). On Linux openWakeWord pulls in
+# tflite-runtime, which only has wheels up to Python 3.11, so use a 3.11 venv.
+listener = [
+    "openwakeword==0.6.0",
+    "sherpa-onnx>=1.12,<2",
+    "sentencepiece>=0.2",
+    "sounddevice>=0.4.6",
+    "numpy>=1.23",
+    "scipy>=1.9",
+]
+# The optional Alexa link through your own AWS account (alexa/README.md).
+aws = ["paho-mqtt>=2.0"]
+test = ["pytest>=7", "jsonschema>=4", "amqtt>=0.11", "paho-mqtt>=2.0"]
+
+[project.scripts]
+x100ctl = "x100.cli:main"
+x100-bridge = "x100_bridge.main:main"
+x100-listener = "x100_listener.main:main"
+
+[tool.setuptools]
+packages = ["x100", "x100_bridge", "x100_listener"]
+
+[tool.setuptools.dynamic]
+version = {attr = "x100.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

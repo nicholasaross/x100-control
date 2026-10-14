@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Alexa voice control for a ViewSonic X100-4K: IoT thing + bridge policy, and the
+  Smart Home add-on Lambda. Deploy with infra/deploy.sh (it creates the bridge
+  certificate from a locally generated key and fills in the parameters).
+
+Parameters:
+  SkillId:
+    Type: String
+    Description: Alexa skill (add-on) ID from the Alexa developer console
+    AllowedPattern: "amzn1\\.ask\\.skill\\.[0-9a-fA-F-]+"
+  ThingName:
+    Type: String
+    Default: x100-projector
+    AllowedPattern: "[a-zA-Z0-9_-]+"
+  BridgeCertificateArn:
+    Type: String
+    Description: ARN of the bridge's X.509 certificate (deploy.sh creates it from a CSR)
+  IotDataEndpoint:
+    Type: String
+    Description: "aws iot describe-endpoint --endpoint-type iot:Data-ATS"
+  FriendlyName:
+    Type: String
+    Default: Projector
+    Description: The name you'll say to Alexa
+  AllowedUserId:
+    Type: String
+    Default: ""
+    Description: Optional Amazon user id (amzn1.account...) allowed to use the skill
+
+Resources:
+  Thing:
+    Type: AWS::IoT::Thing
+    Properties:
+      ThingName: !Ref ThingName
+
+  # The bridge may only: connect as itself, receive its command topic, and
+  # update its own shadow. Nothing else in your AWS account.
+  BridgePolicy:
+    Type: AWS::IoT::Policy
+    Properties:
+      PolicyName: !Sub "${ThingName}-bridge"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: iot:Connect
+            Resource: !Sub "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:client/${ThingName}"
+          - Effect: Allow
+            Action: iot:Subscribe
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/x100/${ThingName}/cmd"
+              - !Sub "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/$aws/things/${ThingName}/shadow/update/rejected"
+          - Effect: Allow
+            Action: iot:Receive
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/x100/${ThingName}/cmd"
+              - !Sub "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/$aws/things/${ThingName}/shadow/update/rejected"
+          - Effect: Allow
+            Action: iot:Publish
+            Resource: !Sub "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/$aws/things/${ThingName}/shadow/update"
+
+  BridgePolicyAttachment:
+    Type: AWS::IoT::PolicyPrincipalAttachment
+    Properties:
+      PolicyName: !Ref BridgePolicy
+      Principal: !Ref BridgeCertificateArn
+
+  BridgeThingAttachment:
+    Type: AWS::IoT::ThingPrincipalAttachment
+    Properties:
+      ThingName: !Ref Thing
+      Principal: !Ref BridgeCertificateArn
+
+  SkillRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: x100-command-and-shadow
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: iot:Publish
+                Resource: !Sub "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/x100/${ThingName}/cmd"
+              - Effect: Allow
+                Action: iot:GetThingShadow
+                Resource: !Sub "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/${ThingName}"
+
+  SkillFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W3002]   # local Code path is intentional: deploy.sh runs `cloudformation package`
+    Properties:
+      FunctionName: !Sub "${ThingName}-alexa"
+      Description: Alexa Smart Home add-on for the X100-4K bridge
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: lambda_function.lambda_handler
+      Code: ../lambda/          # `aws cloudformation package` uploads this folder
+      Role: !GetAtt SkillRole.Arn
+      Timeout: 8                # Alexa waits 8 s; the function answers within ~6.5 s
+      MemorySize: 256
+      Environment:
+        Variables:
+          THING_NAME: !Ref ThingName
+          IOT_DATA_ENDPOINT: !Ref IotDataEndpoint
+          FRIENDLY_NAME: !Ref FriendlyName
+          ALLOWED_USER_ID: !Ref AllowedUserId
+
+  SkillLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${SkillFunction}"
+      RetentionInDays: 30
+
+  # Only your Alexa skill can invoke the function.
+  AlexaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt SkillFunction.Arn
+      Principal: alexa-connectedhome.amazon.com
+      EventSourceToken: !Ref SkillId
+
+Outputs:
+  LambdaArn:
+    Description: Paste this into the Alexa console as the Smart Home service endpoint
+    Value: !GetAtt SkillFunction.Arn
+  ThingName:
+    Value: !Ref Thing
+  CommandTopic:
+    Value: !Sub "x100/${ThingName}/cmd"
