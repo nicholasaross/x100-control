@@ -150,6 +150,17 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - Docs and messages use British spelling and plain, short sentences.
 - Work on a branch and open a pull request. `main` is what gets released.
 
+## The repo is public
+
+- It's `nicholasaross/x100-control` on GitHub, under the MIT licence. Anyone can read every file,
+  commit message and pull request, so write them all for that.
+- Never commit tokens, keys or `*.env` files. Add no more about Nick's house or network than is
+  already here.
+- Commits use Nick's GitHub noreply address, `67790949+nicholasaross@users.noreply.github.com`.
+  His Mac's git settings already do. Before pushing, check with `git log -1 --format=%ae`.
+- The old private repo, `nicholasaross/x100-control-private`, is archived. Don't push to it. The
+  merge messages for "pull request #1" and "#2" in `main`'s early history refer to PRs there.
+
 ## Open items (as of 2026-10-14)
 
 - **Build 94bd0861 (tag `build-94bd0861`) still needs Nick's power-cut test on the real
