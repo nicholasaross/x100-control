@@ -24,12 +24,14 @@ ROOT = Path(__file__).resolve().parents[1]
 PREFIX = "x100-control"            # the zip unpacks into this folder
 STAMP = Path("x100/_build.py")
 
-# Never released: per-install state and secrets, caches, build output, test assets.
-SKIP_DIRS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".git", "build", "dist",
-             "certs", "clips", "models", "test-models", "test-voices"}
+# Never released: per-install state and secrets, caches, build output, test assets, and
+# .claude (Claude Code's local settings, and its worktrees, which are whole copies of the repo).
+SKIP_DIRS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".git", ".claude", "build",
+             "dist", "certs", "clips", "models", "test-models", "test-voices"}
 SKIP_PATHS = {Path("tests/data"), Path("config/inputs.json"), STAMP}
 SKIP_SUFFIXES = {".pyc", ".pyo", ".wav", ".zip", ".env"}   # *.env hold tokens; *.env.example ship
-SKIP_NAMES = {".DS_Store"}                                  # Finder leaves these in folders on a Mac
+SKIP_NAMES = {".DS_Store",                                  # Finder leaves these in folders on a Mac
+              ".git"}                                       # in a git worktree, .git is a file
 
 
 def released_files(root: Path = ROOT) -> List[Path]:

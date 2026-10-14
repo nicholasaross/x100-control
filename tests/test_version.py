@@ -83,6 +83,8 @@ def make_tree(root: Path) -> None:
         ".venv311/bin/python": "",
         ".DS_Store": "finder",
         "x100/.DS_Store": "finder",
+        ".claude/settings.local.json": '{"permissions": {"allow": []}}\n',
+        ".claude/worktrees/wt/README.md": "readme\n",
         "build/lib/x100/__init__.py": "",
         "models/hey_jarvis.onnx": "",
         ".gitignore": "x100/_build.py\n",
@@ -111,6 +113,8 @@ def test_the_build_id_tracks_every_change_but_not_the_stamp(tmp_path):
     assert re.fullmatch(r"[0-9a-f]{8}", first) and build() == first
     mr.write_stamp(first, "2026-10-12", tmp_path)                 # stamping doesn't change the ID it records
     (tmp_path / "bridge.env").write_text("LOCAL_API_TOKEN=other\n")  # nor do your settings
+    (tmp_path / ".claude/settings.local.json").write_text('{"permissions": {"allow": ["Bash"]}}\n')  # nor Claude's
+    (tmp_path / ".claude/worktrees/wt/README.md").write_text("readme.\n")
     assert build() == first
     (tmp_path / "README.md").write_text("readme.\n")
     second = build()
@@ -121,6 +125,15 @@ def test_the_build_id_tracks_every_change_but_not_the_stamp(tmp_path):
     assert build() == second
     (tmp_path / "config/README.md").rename(tmp_path / "config/INPUTS.md")
     assert build() != second
+
+
+def test_a_worktree_builds_the_same_as_its_checkout(tmp_path):
+    """In a git worktree, .git is a file that points at the main repo, not a folder."""
+    make_tree(tmp_path)
+    files = mr.released_files(tmp_path)
+    (tmp_path / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
+    assert mr.released_files(tmp_path) == files
+    assert mr.build_id(files, tmp_path) == mr.build_id(mr.released_files(tmp_path), tmp_path)
 
 
 def test_the_zip_unpacks_into_one_folder_with_the_stamp_and_exec_bits(tmp_path):
