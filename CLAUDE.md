@@ -111,7 +111,7 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - **The `test` extra needs Python 3.10 or later,** because amqtt does. A Mac's built-in `python3`
   may be 3.9.
 - **To test on 3.9,** install the package with `pytest` instead of the extra. The MQTT and listener
-  tests then skip: 159 passed and 14 skipped last time.
+  tests then skip: 160 passed and 14 skipped last time.
 - **Other skips need setting up first.** The Alexa schema tests and the real-speech tests skip until
   that's done, as tests/README.md describes.
 
