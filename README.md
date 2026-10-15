@@ -242,6 +242,14 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
   * asks only the power question once the projector stops answering, every 30 s, and when it answers
     again sends nothing at all for 5 minutes. Commands in that time get the two falling notes, and
     the log says until when; the remote works once the projector has started up;
+  * in standby, asks only the power question, every 2 s, and the rest only when a command comes. A
+    power cut short enough to fall between two questions can't be seen, and booting looks just like
+    starting up, so a routine question then would hang it. When the projector is on, the same check
+    runs between the usual questions. Any cut longer than about 2 s is seen and gets the 5 minutes'
+    quiet. The price: in standby, the bridge doesn't notice the remote starting the projector until
+    the next command, so an "off" after that waits 2 minutes, and "on" takes about a second longer
+    while the bridge checks first. A command within 5 minutes of a cut too short to see can still
+    hang it;
   * leaves the projector alone for the first 5 minutes after the Pi itself starts, since a mains cut
     takes out both;
   * sends no power command for 2 minutes after the projector starts (by voice, remote or its button):
@@ -251,7 +259,7 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
 
   Best avoided all the same: switching it off at the wall. If it ever hangs, switch it off at the wall
   for 2 minutes and back on, then leave it 3 minutes before using its remote. `X100_START_HOLD_SECONDS`,
-  `X100_POWER_UP_QUIET_SECONDS`, `X100_OUTAGE_PROBE_SECONDS` and the start-up timings
+  `X100_POWER_UP_QUIET_SECONDS`, `X100_OUTAGE_PROBE_SECONDS`, `X100_POWER_CHECK_SECONDS` and the start-up timings
   (`X100_COOLDOWN_SECONDS`, `X100_WARMUP_SECONDS`, `X100_SETTLE_SECONDS`) are in `bridge.env`.
 
 ## Speed on the Pi 3
@@ -325,7 +333,8 @@ included, works against the simulator. (`--port 4661` instead simulates the LAN 
   once the projector has visibly started (see above). During warm-up and cool-down the projector
   refuses most commands, so the bridge queues them and runs them in order once it's ready.
   Turning off cancels anything queued. State is polled every 30 s (every 2 s around changes), so it
-  stays right when you use the remote.
+  stays right when you use the remote, except that an X100-4K in standby is asked only whether it has
+  power (see above).
 * **Audio** stays in the Pi's memory and is dropped as it's processed. `SAVE_CLIPS_DIR` is the only
   thing that writes audio to disk, and it keeps the newest 500 clips.
 

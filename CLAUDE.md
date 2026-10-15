@@ -63,6 +63,9 @@ the wall.
     starting, and ignores its remote and its own button. It stays that way until it has been off at
     the wall and then boots undisturbed.
   - Silent power-ups were fine (tested twice).
+  - A cut short enough to fall between two polls looks like nothing happened: it answers again by the
+    next poll, and booting looks just like starting up. In the simulator, that poll's question about
+    the input hangs it. This is the likeliest cause of the 14 October hang, but it's unproven.
 - **An "off" 66 s after "on", just as the picture appeared, also hung it.**
 - So the bridge:
   - **After any failed reading:** asks only the power query, 2 s after the first failure and then
@@ -72,6 +75,16 @@ the wall.
     when.
   - **When the Pi has been up for less than 300 s:** starts the same way, since the Pi and the
     projector may have shared the power cut.
+  - **In standby:** asks only the power query, every 2 s (`X100_POWER_CHECK_SECONDS`), and asks the
+    rest only when a command comes. When it's on, the same check runs between the 30 s polls. Any
+    cut longer than about 2 s is then seen, and gets the 300 s quiet.
+    - The price: a remote start from standby goes unseen until the next command, so an "off" then
+      waits the full 120 s, and "on" takes about a second longer, as the bridge reads first.
+    - Still at risk: a command within 300 s of a cut too short to see.
+    - The checks start once the bridge has seen it in standby. Until then it doesn't know this is
+      an X100-4K.
+  - **Logs a start it didn't ask for.** When only the power query answers, that line can't tell a
+    remote start from a boot after a blip, but it shows what the projector looked like before a hang.
   - **For 120 s after a start (`X100_START_HOLD_SECONDS`):** sends no power command. An "off"
     waits, and a repeated "on" isn't sent.
   - **Never resends "on" by itself.** 2 s after "on" it checks whether volume still answers. If it
@@ -111,7 +124,12 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - **The `test` extra needs Python 3.10 or later,** because amqtt does. A Mac's built-in `python3`
   may be 3.9.
 - **To test on 3.9,** install the package with `pytest` instead of the extra. The MQTT and listener
-  tests then skip: 159 passed and 14 skipped last time.
+  tests then skip: 163 passed and 14 skipped last time.
+  - With the Mac's own 3.9 (`/usr/bin/python3`), three tests in `test_serial.py` hang:
+    `test_the_driver_over_rs232`, `test_line_noise_before_a_reply_is_skipped` and
+    `test_the_bridge_over_rs232_with_the_default_pause`. They use the pseudo-terminal from inside
+    the test process, and they hung on `main` too (2026-10-15). Deselect them there. They pass on
+    3.11 and 3.13.
 - **Other skips need setting up first.** The Alexa schema tests and the real-speech tests skip until
   that's done, as tests/README.md describes.
 
@@ -161,13 +179,21 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - The old private repo, `nicholasaross/x100-control-private`, is archived. Don't push to it. The
   merge messages for "pull request #1" and "#2" in `main`'s early history refer to PRs there.
 
-## Open items (as of 2026-10-14)
+## Open items (as of 2026-10-15)
 
-- **Build 94bd0861 (tag `build-94bd0861`) still needs Nick's power-cut test on the real
-  projector.**
-  1. With the services running, he switches the projector off at the wall.
-  2. The bridge log should say it "isn't answering".
-  3. After he switches it back on, the log should say "answering again … leaving it alone until …".
-  4. After that time, "Hey Jarvis, projector on" should start it.
-- **If it hangs anyway,** the lone power query is itself harmful while it boots. The next step is
-  `x100ctl listen` during a power-up, to see what the projector says unprompted.
+- **The hang on 14 October, under build 94bd0861.** At 18:38 the first voice "on" was acknowledged,
+  but the projector stayed in standby, and it needed a wall power-cycle. Nick hadn't used the remote
+  that afternoon or noticed any flicker. Since the "off" at 11:44 the bridge had only polled standby,
+  and no reading failed. A blip between polls is the likeliest cause; the projector hanging by
+  itself under standby polls is the other. The standby checks above guard against the first, and
+  ask less in standby, which can only help with the second. The start log line would show next
+  time what it looked like. They still need a build and Nick's install.
+- **Build 94bd0861's power-cut handling worked** at 18:39–18:46 on 14 October: "isn't answering",
+  then "answering again … leaving it alone until 18:46:00", a voice "on" refused meanwhile, and a
+  normal start after that.
+- **`x100ctl listen` across a wall power-cycle:** result pending. If the projector says anything
+  unprompted as it powers up, even a stray byte, the bridge could act on it. It already drains such
+  bytes before each question, and would catch cuts of any length that way.
+- **Not yet shown on the real projector:** that the power query every 2 s is harmless while it boots.
+  So far only a single power query during a boot is known to be fine. `x100ctl trace --power-only
+  --interval 2` across a power-up would show it.

@@ -65,7 +65,8 @@ def bridge(srv, expect=PowerState.OFF, **overrides):
     return core
 
 
-POWER_CUT = dict(outage_probe_seconds=0.3, power_up_quiet_seconds=1.5, poll_interval=0.2)  # scaled down
+POWER_CUT = dict(outage_probe_seconds=0.3, power_up_quiet_seconds=1.5, poll_interval=0.2,  # scaled down
+                 power_check_seconds=0.2)
 ON = [{"op": "power", "value": "ON"}]
 
 
@@ -306,16 +307,20 @@ def test_an_off_soon_after_start_up_is_held_until_its_safe(x100):
 
 
 def test_an_off_is_held_after_the_remote_starts_it_too(x100):
+    """In standby the bridge asks only about power, so it first sees the remote's start when a command
+    comes. It holds an "off" from then, not knowing how long ago it started."""
     x100.state.hang_if_off_within = 2.5
-    core = bridge(x100, start_hold_seconds=3.0, poll_interval=0.2)
+    core = bridge(x100, start_hold_seconds=3.0, poll_interval=0.2, power_check_seconds=0.2)
     try:
         with x100.state.lock:
             x100.state.turn_on()  # the remote's power button
         started = time.monotonic()
-        assert wait_for(lambda: core.state.power == PowerState.ON)
+        assert wait_for(lambda: mock_power(x100) == PowerState.ON)
+        asked = time.monotonic()
         assert core.submit_and_wait([{"op": "power", "value": "OFF"}])["deferred"]
         assert wait_for(lambda: writes(x100, "W 11 01"), limit=6)
-        assert time.monotonic() - started >= 3.0 - 0.05 and not x100.state.hung
+        assert time.monotonic() - asked >= 3.0 - 0.05 and not x100.state.hung
+        assert time.monotonic() - started >= 3.0 + 1.2  # later than it need have been: the price of not asking
     finally:
         core.stop()
 
@@ -381,8 +386,27 @@ def test_an_input_waits_for_start_up_and_a_moment_more(x100):
         core.stop()
 
 
-def test_the_remote_is_noticed_on_and_off(x100):
-    core = bridge(x100, poll_interval=0.2)
+def test_in_standby_the_remote_is_noticed_at_the_next_command(x100):
+    """The price of asking only about power in standby: a start by its remote goes unseen until a command
+    comes. Once it's on, the usual polls notice the remote switching it off."""
+    core = bridge(x100, poll_interval=0.2, power_check_seconds=0.2)
+    try:
+        with x100.state.lock:
+            x100.state.turn_on()  # the remote's power button
+        assert wait_for(lambda: mock_power(x100) == PowerState.ON)
+        assert core.state.power == PowerState.OFF  # unseen
+        assert core.submit_and_wait([{"op": "volume", "value": 12}])["ok"]
+        assert core.state.power == PowerState.ON and x100.state.volume == 12
+        with x100.state.lock:
+            x100.state.turn_off()
+        assert wait_for(lambda: core.state.power == PowerState.OFF)
+        assert not writes(x100, "W 11")  # and the bridge sent no power command of its own
+    finally:
+        core.stop()
+
+
+def test_the_remote_is_noticed_on_and_off_when_standby_polls_ask_everything(x100):
+    core = bridge(x100, poll_interval=0.2, power_check_seconds=0)
     try:
         seen = []
 
@@ -517,7 +541,7 @@ def test_after_a_power_cut_it_asks_only_about_power_then_leaves_it_alone(x100):
 
 def test_without_the_quiet_the_questions_hang_it_as_they_did_the_real_one(x100):
     booting_x100(x100)
-    core = bridge(x100, **dict(POWER_CUT, power_up_quiet_seconds=0))
+    core = bridge(x100, **dict(POWER_CUT, power_up_quiet_seconds=0, power_check_seconds=0))  # as it was
     try:
         switch_off_at_the_wall(x100, core, then_quiet=False)
         assert wait_for(lambda: x100.state.hung, limit=3)
@@ -528,14 +552,14 @@ def test_without_the_quiet_the_questions_hang_it_as_they_did_the_real_one(x100):
         core.stop()
 
 
-def test_a_blip_between_standby_polls_hangs_it(x100, caplog):
+def test_a_blip_between_standby_polls_used_to_hang_it(x100, caplog):
     """Perhaps what hung the real one on 2026-10-14: the power went off and came back between two standby
     polls, so the bridge never heard silence. The next poll took the boot for a normal start-up, and its
-    question about the input hung it."""
+    question about the input hung it. That was before standby polls asked only about power."""
     caplog.set_level(logging.INFO, logger="x100.bridge")
     booting_x100(x100)
     x100.state.boot_seconds = 2.0  # the bridge loop can poll up to 0.25 s late: keep the poll inside the boot
-    core = bridge(x100, poll_interval=2.0, fast_poll_window=0)
+    core = bridge(x100, poll_interval=2.0, fast_poll_window=0, power_check_seconds=0)
     try:
         with x100.state.lock:
             x100.state.power_cut()  # just after a standby poll
@@ -548,6 +572,58 @@ def test_a_blip_between_standby_polls_hangs_it(x100, caplog):
         assert wait_for(lambda: not x100.state.booting() and core.state.power == PowerState.OFF, limit=4)
         result = core.submit_and_wait(ON)
         assert not result["ok"] and "looks like it's in standby" in result["message"]
+    finally:
+        core.stop()
+
+
+def test_in_standby_a_blip_too_short_to_see_does_no_harm(x100):
+    """The same blip now: in standby the bridge asks only the power query, which it answers while it boots."""
+    booting_x100(x100)
+    x100.state.boot_seconds = 2.0
+    core = bridge(x100, poll_interval=2.0, fast_poll_window=0, power_check_seconds=1.0)
+    try:
+        asked = len(x100.state.log)
+        assert wait_for(lambda: len(x100.state.log) > asked, limit=2)  # a check: cut the power just after it
+        with x100.state.lock:
+            x100.state.power_cut()
+        time.sleep(0.3)
+        with x100.state.lock:
+            x100.state.power_restored()  # back before the next check, so the bridge can't tell
+        assert wait_for(lambda: "R 11 00 (booting)" in x100.state.log, limit=2)
+        assert wait_for(lambda: not x100.state.booting(), limit=3)
+        assert set(x100.state.log[asked:]) == {"R 11 00", "R 11 00 (booting)"}  # only ever the power query
+        assert not x100.state.hung and core._lost_since is None and core.state.power == PowerState.OFF
+        assert core.submit_and_wait(ON)["ok"]
+        assert wait_for(lambda: x100.state.power == PowerState.ON, limit=4)
+    finally:
+        core.stop()
+
+
+def test_in_standby_a_short_cut_is_seen_and_it_is_left_alone(x100):
+    """Longer than the gap between checks, a cut is seen long before the next full poll would come."""
+    booting_x100(x100)
+    core = bridge(x100, **dict(POWER_CUT, poll_interval=30))
+    try:
+        switch_off_at_the_wall(x100, core, off_for=0.5)
+        assert wait_for(lambda: not core._quiet(), limit=3)
+        assert [e for e in x100.state.log if "(booting)" in e] == ["R 11 00 (booting)"]  # the probe alone
+        assert not x100.state.hung and core.submit_and_wait(ON)["ok"]
+        assert wait_for(lambda: x100.state.power == PowerState.ON, limit=4)
+    finally:
+        core.stop()
+
+
+def test_when_its_on_a_cut_between_polls_is_seen_too(x100):
+    booting_x100(x100)
+    core = bridge(x100, fast_poll_window=0, **dict(POWER_CUT, poll_interval=30))  # it learns its ways in standby
+    try:
+        assert core.submit_and_wait(ON)["ok"]
+        assert wait_for(lambda: core.state.power == PowerState.ON and mock_power(x100) == PowerState.ON, limit=4)
+        assert wait_for(lambda: core._next_full_poll - time.monotonic() > 20)  # the next full poll is a way off
+        switch_off_at_the_wall(x100, core, off_for=0.5)
+        assert wait_for(lambda: not core._quiet(), limit=3)
+        assert [e for e in x100.state.log if "(booting)" in e] == ["R 11 00 (booting)"]
+        assert not x100.state.hung and core.state.power == PowerState.OFF  # it comes back in standby
     finally:
         core.stop()
 
