@@ -250,6 +250,9 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
     the next command, so an "off" after that waits 2 minutes, and "on" takes about a second longer
     while the bridge checks first. A command within 5 minutes of a cut too short to see can still
     hang it;
+  * after a power cut, sometimes finds its standby answering just as if it were on, until it's next
+    started. Until the bridge has seen it in standby or starting, "on" (or an input) gets the two
+    falling notes, and the log says to start it with its remote this once. "Off" works as usual;
   * leaves the projector alone for the first 5 minutes after the Pi itself starts, since a mains cut
     takes out both;
   * sends no power command for 2 minutes after the projector starts (by voice, remote or its button):
@@ -261,6 +264,9 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
   for 2 minutes and back on, then leave it 3 minutes before using its remote. `X100_START_HOLD_SECONDS`,
   `X100_POWER_UP_QUIET_SECONDS`, `X100_OUTAGE_PROBE_SECONDS`, `X100_POWER_CHECK_SECONDS` and the start-up timings
   (`X100_COOLDOWN_SECONDS`, `X100_WARMUP_SECONDS`, `X100_SETTLE_SECONDS`) are in `bridge.env`.
+  `X100_QUIRKS=true` there tells the bridge it's an X100-4K from the start. Without it, the bridge
+  learns that from the first standby or start it sees, and after a power cut that can take until the
+  projector is next started.
 
 ## Speed on the Pi 3
 
@@ -309,6 +315,7 @@ woke it" is always slower, as it replays the last 0.5 s into the spotter; the ne
 | Two rising notes but nothing happened | It probably heard the other command (on/off) and there was nothing to do. Say it again. |
 | Two falling notes after "on", and the log says the projector "hasn't started" | It acknowledged "on" but stayed in standby: it has probably hung. If its remote can't start it either, switch it off at the wall for 2 minutes, back on, and leave it 3 minutes before using the remote (the bridge stays quiet meanwhile). |
 | Two falling notes, and the log says the projector "may still be booting" | It stopped answering for a while (a power cut, say), and questions while it boots can hang it, so the bridge leaves it alone for 5 minutes after it answers again (the log says until when). Its remote works once it has started up. |
+| Two falling notes, and the log says the projector "looks on, but after a power cut its standby can look just the same" | After a power cut, its standby sometimes answers just like on, so the bridge can't tell whether it's on. If it isn't, start it with its remote this once. After that, voice works as usual. |
 | Wondering what the projector does as it powers up | With the bridge stopped: `x100ctl --env-file bridge.env listen` sends nothing and prints anything it says by itself; `trace --power-only` asks only the power question, once a second. Plain `trace` asks everything, which hangs it if it's booting. |
 | The low note during films | The soundtrack set off the wake word: raise `WAKE_THRESHOLD`, move the Jabra away from the speakers, or `UNCLEAR_CHIME=false`. |
 | `--test-mic` shows overruns, or frames near 80 ms | The Pi is falling behind: `--check` for under-voltage (use the 2.5 A supply), compare `WAKE_THREADS` and `KWS_THREADS` (see [Speed on the Pi 3](#speed-on-the-pi-3)), or a Pi 4. |

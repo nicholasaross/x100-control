@@ -214,6 +214,11 @@ def test_power_commands_are_held_for_a_while_after_any_start():
     assert starting._start_held()
     starting._power_query_lies = False
     assert not starting._start_held()  # by-the-book projectors needn't wait
+    # ...and so does one found starting when it had looked on: its standby after a power cut can look like that.
+    cold, _ = rules(start_hold_seconds=120)
+    cold.state.set_power(PowerState.ON)
+    cold._settle_power(PowerState.WARMING)
+    assert cold._start_held()
 
 
 def test_a_start_the_bridge_didnt_ask_for_is_logged(caplog):
@@ -624,6 +629,82 @@ def test_when_its_on_a_cut_between_polls_is_seen_too(x100):
         assert wait_for(lambda: not core._quiet(), limit=3)
         assert [e for e in x100.state.log if "(booting)" in e] == ["R 11 00 (booting)"]
         assert not x100.state.hung and core.state.power == PowerState.OFF  # it comes back in standby
+    finally:
+        core.stop()
+
+
+def test_told_its_an_x100_the_bridge_needs_no_standby_to_learn_it(x100, monkeypatch):
+    """A bridge that starts while the projector is on, or in the standby that looks on, can't tell what it is
+    until it sees a standby or a start, and until then none of these rules apply. X100_QUIRKS says so."""
+    x100.state.power = PowerState.ON
+    booting_x100(x100)
+    unsure = bridge(x100, expect=PowerState.ON, **dict(POWER_CUT, poll_interval=30))
+    try:
+        assert not unsure._power_query_lies and not unsure._checking_power()  # it would miss a cut
+    finally:
+        unsure.stop()
+    monkeypatch.setenv("X100_QUIRKS", "true")
+    assert Config.from_env().x100_quirks
+    core = bridge(x100, expect=PowerState.ON, x100_quirks=True, fast_poll_window=0, **dict(POWER_CUT, poll_interval=30))
+    try:
+        assert core._checking_power()
+        switch_off_at_the_wall(x100, core, off_for=0.5)
+        assert wait_for(lambda: not core._quiet(), limit=3)
+        assert [e for e in x100.state.log if "(booting)" in e] == ["R 11 00 (booting)"] and not x100.state.hung
+    finally:
+        core.stop()
+
+
+def test_after_a_power_cut_a_standby_that_looks_on_gets_an_honest_answer(x100):
+    """After one power-up of two on 15 October, its standby answered everything as if it were on, until it was
+    started. A voice "on" then got "ok" and did nothing. Now the bridge says so, and sends nothing, until it
+    has seen it in standby or starting. And a start by the remote from there is held like any other."""
+    booting_x100(x100)
+    x100.state.cold_standby_after_power_up = True
+    x100.state.hang_if_off_within = 2.5
+    core = bridge(x100, start_hold_seconds=3.0, **POWER_CUT)
+    try:
+        switch_off_at_the_wall(x100, core)
+        assert wait_for(lambda: not core._quiet(), limit=3)
+        looks = driver(x100).power_reading()
+        assert looks.state == PowerState.ON and mock_power(x100) == PowerState.OFF  # it's in standby, honestly
+        refused = core.submit_and_wait(ON)
+        assert not refused["ok"] and "after a power cut its standby can look just the same" in refused["message"]
+        assert "its remote this once" in refused["message"]
+        hdmi = core.submit_and_wait([{"op": "input", "value": "HDMI 2"}])
+        assert not hdmi["ok"] and "after a power cut" in hdmi["message"]
+        assert not writes(x100, "W 11 00") and not writes(x100, "W 13 01")  # nothing sent
+        with x100.state.lock:
+            x100.state.turn_on()  # its remote, this once
+        assert wait_for(lambda: not core._since_cut, limit=3)  # seen starting: it can tell again
+        assert wait_for(lambda: core.state.power == PowerState.ON and mock_power(x100) == PowerState.ON, limit=4)
+        off = core.submit_and_wait([{"op": "power", "value": "OFF"}])
+        assert off["ok"] and off["deferred"]  # it has only just started
+        assert wait_for(lambda: writes(x100, "W 11 01"), limit=6) and not x100.state.hung
+        assert wait_for(lambda: core.state.power == PowerState.OFF, limit=3)
+        time.sleep(0.7)  # past the cool-down: a normal standby now
+        assert core.submit_and_wait(ON)["ok"]
+        assert wait_for(lambda: x100.state.power == PowerState.ON, limit=4)
+    finally:
+        core.stop()
+
+
+def test_after_this_computer_starts_a_standby_that_looks_on_isnt_believed_either(x100):
+    """A mains cut takes the Pi and the projector together, so the same goes once the Pi is back."""
+    booting_x100(x100)
+    x100.state.cold_standby_after_power_up = True
+    with x100.state.lock:
+        x100.state.power_restored()  # the mains has just come back
+    core = BridgeCore(Config(poll_interval=0.2, fast_poll_interval=0.1, heartbeat_interval=600, defer_timeout=10,
+                             warmup_seconds=5, cooldown_seconds=0.6, settle_seconds=0.5, start_check_seconds=0.3,
+                             pending_check_interval=0.05, power_up_quiet_seconds=1.5, x100_quirks=True),
+                      driver(x100), make_inputs(), publish=lambda doc: None, uptime=lambda: 0.2)
+    core.start()
+    try:
+        assert wait_for(lambda: core.state.connected and core.state.power == PowerState.ON, limit=4)
+        refused = core.submit_and_wait(ON)
+        assert not refused["ok"] and "after a power cut" in refused["message"]
+        assert not writes(x100, "W 11 00") and not x100.state.hung
     finally:
         core.stop()
 
