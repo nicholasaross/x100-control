@@ -506,6 +506,28 @@ def test_without_the_quiet_the_questions_hang_it_as_they_did_the_real_one(x100):
         core.stop()
 
 
+def test_a_blip_between_standby_polls_hangs_it(x100):
+    """Perhaps what hung the real one on 2026-10-14: the power went off and came back between two standby
+    polls, so the bridge never heard silence. The next poll took the boot for a normal start-up, and its
+    question about the input hung it."""
+    booting_x100(x100)
+    x100.state.boot_seconds = 2.0  # the bridge loop can poll up to 0.25 s late: keep the poll inside the boot
+    core = bridge(x100, poll_interval=2.0, fast_poll_window=0)
+    try:
+        with x100.state.lock:
+            x100.state.power_cut()  # just after a standby poll
+        time.sleep(1.0)
+        with x100.state.lock:
+            x100.state.power_restored()  # and back before the next one
+        assert wait_for(lambda: "R 13 01 (booting)" in x100.state.log, limit=3)
+        assert x100.state.hung and core._lost_since is None and not core._quiet()  # it never saw the cut
+        assert wait_for(lambda: not x100.state.booting() and core.state.power == PowerState.OFF, limit=4)
+        result = core.submit_and_wait(ON)
+        assert not result["ok"] and "looks like it's in standby" in result["message"]
+    finally:
+        core.stop()
+
+
 def test_commands_get_an_answer_and_the_projector_hears_nothing(x100):
     core = bridge(x100, **dict(POWER_CUT, power_up_quiet_seconds=2.0))
     try:
