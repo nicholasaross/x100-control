@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("serial")
+serial = pytest.importorskip("serial")
 if not hasattr(os, "openpty"):
     pytest.skip("needs pseudo-terminals (Linux or macOS)", allow_module_level=True)
 
@@ -40,6 +40,25 @@ def wait_for(predicate, limit=5.0):
 
 def clean_env():
     return {k: v for k, v in os.environ.items() if not k.startswith(("X100_", "AWS_IOT", "LOCAL_API"))}
+
+
+@pytest.fixture(autouse=True)
+def flush_that_lets_the_mock_run(monkeypatch):
+    """pyserial's flush() calls termios.tcdrain(), which waits until the other end of the line has read
+    what was sent. On a pseudo-terminal, the other end is MockSerial's thread. When the test opens the
+    port itself, that thread is in the same process. Python 3.9's tcdrain() holds the GIL while it
+    waits, so the thread can't run and the test hangs. From 3.10, tcdrain() lets go of the GIL.
+
+    So on 3.9 this waits for the same thing in short sleeps, which do let go. A real adapter drains by
+    itself, so the bridge doesn't need this."""
+    if sys.version_info >= (3, 10):
+        return
+
+    def flush(ser):
+        while ser.out_waiting:
+            time.sleep(0.001)
+
+    monkeypatch.setattr(serial.Serial, "flush", flush)
 
 
 @pytest.fixture
