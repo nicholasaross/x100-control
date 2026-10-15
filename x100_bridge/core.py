@@ -459,6 +459,13 @@ class BridgeCore:
                 (power == PowerState.WARMING and prev in (PowerState.OFF, PowerState.COOLING, PowerState.UNKNOWN))
                 or (power == PowerState.ON and prev in (PowerState.OFF, PowerState.COOLING))):
             self._started_at = now  # out of standby without us: its remote, or its own button
+            if power == PowerState.WARMING and self._power_query_lies:
+                # As it looks while it boots after a power cut, too: then the log can tell which it was.
+                log.info("only the projector's power query answers, and the bridge didn't start it: its remote or "
+                         "its own button did, or it's booting after a power blip")
+            else:
+                log.info("the projector is %s, and the bridge didn't start it: its remote or its own button did",
+                         "starting up" if power == PowerState.WARMING else "on")
         self.state.set_power(power)
         self._confirmed_at = now
         return power

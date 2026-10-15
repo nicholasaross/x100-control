@@ -14,6 +14,7 @@ quirks mode, which does what the real projector did in traces over RS-232:
   hang_if_asked_while_booting).
 """
 
+import logging
 import os
 import subprocess
 import sys
@@ -212,6 +213,27 @@ def test_power_commands_are_held_for_a_while_after_any_start():
     assert starting._start_held()
     starting._power_query_lies = False
     assert not starting._start_held()  # by-the-book projectors needn't wait
+
+
+def test_a_start_the_bridge_didnt_ask_for_is_logged(caplog):
+    """Only the power query answering looks the same whether its remote started it or it's booting after
+    a power blip. Saying so in the log shows afterwards what the projector looked like before a hang."""
+    with caplog.at_level(logging.INFO, logger="x100.bridge"):
+        core, _ = rules()
+        core.state.set_power(PowerState.OFF)
+        for seen in (PowerState.WARMING, PowerState.WARMING, PowerState.ON):
+            core._settle_power(seen)
+        on, _ = rules()
+        on.state.set_power(PowerState.OFF)
+        on._settle_power(PowerState.ON)  # it was already showing a picture by the time the bridge asked
+        ours, _ = rules()
+        ours.state.set_power(PowerState.WARMING)
+        ours._sent_on = ours._started_at = time.monotonic()  # as after the bridge's own "on"
+        ours._settle_power(PowerState.WARMING)
+    said = [r.getMessage() for r in caplog.records]
+    assert len(said) == 2  # once per start, and not for its own
+    assert "only the projector's power query answers" in said[0] and "booting after a power blip" in said[0]
+    assert said[1].startswith("the projector is on, and the bridge didn't start it")
 
 
 def test_by_the_book_projectors_are_taken_at_their_word():
@@ -506,10 +528,11 @@ def test_without_the_quiet_the_questions_hang_it_as_they_did_the_real_one(x100):
         core.stop()
 
 
-def test_a_blip_between_standby_polls_hangs_it(x100):
+def test_a_blip_between_standby_polls_hangs_it(x100, caplog):
     """Perhaps what hung the real one on 2026-10-14: the power went off and came back between two standby
     polls, so the bridge never heard silence. The next poll took the boot for a normal start-up, and its
     question about the input hung it."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
     booting_x100(x100)
     x100.state.boot_seconds = 2.0  # the bridge loop can poll up to 0.25 s late: keep the poll inside the boot
     core = bridge(x100, poll_interval=2.0, fast_poll_window=0)
@@ -521,6 +544,7 @@ def test_a_blip_between_standby_polls_hangs_it(x100):
             x100.state.power_restored()  # and back before the next one
         assert wait_for(lambda: "R 13 01 (booting)" in x100.state.log, limit=3)
         assert x100.state.hung and core._lost_since is None and not core._quiet()  # it never saw the cut
+        assert wait_for(lambda: any("booting after a power blip" in r.getMessage() for r in caplog.records))
         assert wait_for(lambda: not x100.state.booting() and core.state.power == PowerState.OFF, limit=4)
         result = core.submit_and_wait(ON)
         assert not result["ok"] and "looks like it's in standby" in result["message"]
