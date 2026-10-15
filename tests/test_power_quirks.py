@@ -290,12 +290,12 @@ def test_an_off_soon_after_start_up_is_held_until_its_safe(x100):
     core = bridge(x100, start_hold_seconds=3.0)
     try:
         on = core.submit_and_wait([{"op": "power", "value": "ON"}])
-        sent_on = time.monotonic()
+        sent_on = core._sent_on  # when "on" went out: its ack comes later, once it's seen to have started
         assert on["ok"] and wait_for(lambda: core.state.power == PowerState.ON)
         off = core.submit_and_wait([{"op": "power", "value": "OFF"}])
         assert off["ok"] and off["deferred"]
         assert wait_for(lambda: writes(x100, "W 11 01"), limit=6)
-        assert time.monotonic() - sent_on >= 3.0 - 0.3  # not before the hold (the "on" ack came 0.3 s in)
+        assert time.monotonic() - sent_on >= 3.0  # not before the hold
         assert not x100.state.hung
         assert wait_for(lambda: core.state.power == PowerState.OFF, limit=3)
         time.sleep(0.7)  # past the cool-down
