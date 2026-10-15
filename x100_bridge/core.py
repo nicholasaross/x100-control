@@ -104,6 +104,15 @@ class Config:
     # power_up_quiet_seconds. The same after this computer starts up, in case the mains went off.
     # It also hung after an "off" 66 s after "on", so for start_hold_seconds after it starts, by any
     # means, no power command goes to it: an "off" waits, and a repeated "on" isn't sent.
+    # A power cut short enough to fall between two polls goes unseen, and booting looks just like
+    # starting up, so the next poll's questions would hang it. So in standby the bridge asks only the
+    # power query, every power_check_seconds, and asks the rest only when a command comes. Once it's on,
+    # the same check runs between the usual polls. Any cut longer than this gets the quiet time above.
+    # The price: in standby, it doesn't notice the remote starting it until a command comes. 0: off.
+    power_check_seconds: float = 2.0
+    # Otherwise the bridge learns all this from the first reading that shows it: standby, or a start.
+    # After a power cut that can be a while, as its standby then sometimes answers like on.
+    x100_quirks: bool = False       # this is an X100-4K: the rules above apply from the start
     warmup_seconds: float = 90.0
     cooldown_seconds: float = 5.0
     settle_seconds: float = 15.0
@@ -161,6 +170,8 @@ class Config:
             start_hold_seconds=_env_float("X100_START_HOLD_SECONDS", 120.0),
             power_up_quiet_seconds=_env_float("X100_POWER_UP_QUIET_SECONDS", 300.0),
             outage_probe_seconds=_env_float("X100_OUTAGE_PROBE_SECONDS", 30.0),
+            power_check_seconds=_env_float("X100_POWER_CHECK_SECONDS", 2.0),
+            x100_quirks=_env_bool("X100_QUIRKS", False),
             scenes=parse_scenes(e("X100_SCENES", "")),
             shadow_topic_prefix=e("SHADOW_TOPIC_PREFIX", "$aws/things"),
             local_api_bind=e("LOCAL_API_BIND", "127.0.0.1:8661"),
@@ -245,6 +256,7 @@ class BridgeCore:
         self.seen_ids: Deque[str] = deque(maxlen=128)
         self._last_published: Optional[Dict[str, Any]] = None
         self._next_poll = 0.0
+        self._next_full_poll = 0.0              # between full polls, just the power query (see Config)
         self._next_heartbeat = 0.0
         self._fast_until = 0.0
         self._next_pending_check = 0.0
@@ -254,7 +266,7 @@ class BridgeCore:
         self._waiters: Dict[str, _Waiter] = {}
         self._waiters_lock = threading.Lock()
         # For projectors whose power query says "on" in standby too (see Projector.power_reading):
-        self._power_query_lies = False
+        self._power_query_lies = cfg.x100_quirks
         self._sent_on: Optional[float] = None   # when we last switched it on / off (monotonic)
         self._sent_off: Optional[float] = None
         self._confirmed_at = 0.0                # when a reading last confirmed the power state
@@ -266,6 +278,9 @@ class BridgeCore:
         self._lost_since: Optional[float] = None
         self._lost_said = False                 # logged that it isn't answering
         self._quiet_until = 0.0
+        # Since a power cut (or this computer starting), not yet seen in standby or starting: its standby
+        # can then answer just like on, so a reading that says "on" may be wrong.
+        self._since_cut = False
         self._uptime = uptime
 
     # ------------------------------------------------------------------ intake
@@ -309,9 +324,12 @@ class BridgeCore:
 
     # ------------------------------------------------------------------ loop
     def start(self) -> None:
+        if self._power_query_lies:
+            self._say_quirky("X100_QUIRKS is set")
         up = self._uptime() if self._uptime is not None else None
         if up is not None and up < self.cfg.power_up_quiet_seconds:
             self._quiet_for(self.cfg.power_up_quiet_seconds - up)
+            self._since_cut = True
             log.info("this computer started %.0f s ago, perhaps with the projector after a power cut: leaving the "
                      "projector alone until %s, as questions while it boots can hang it", up, self._quiet_end())
         self._thread = threading.Thread(target=self._run, name="bridge-core", daemon=True)
@@ -412,8 +430,7 @@ class BridgeCore:
         self.state.connected = True
         if reading.quirky and not self._power_query_lies:
             self._power_query_lies = True
-            log.info("this projector answers 'on' to the power query in standby too: telling standby, "
-                     "start-up and on apart from its other answers")
+            self._say_quirky("this projector answers 'on' to the power query in standby too")
         s = self.state
         if reading.source is not None:
             s.input_code = reading.source
@@ -423,6 +440,13 @@ class BridgeCore:
         if reading.muted is not None:
             s.muted = reading.muted
         return reading
+
+    def _say_quirky(self, why: str) -> None:
+        log.info("%s: telling standby, start-up and on apart from its other answers", why)
+        if self.cfg.power_check_seconds > 0:
+            log.info("in standby, only asking it whether it has power, every %g s, as other questions "
+                     "hang it if it's booting after a power blip: the rest waits for a command",
+                     self.cfg.power_check_seconds)
 
     def _in_cooldown(self) -> bool:
         return (self._power_query_lies and self._sent_off is not None
@@ -440,6 +464,8 @@ class BridgeCore:
         self._seen = seen
         power = seen
         if self._power_query_lies:
+            if seen in (PowerState.OFF, PowerState.WARMING):
+                self._since_cut = False  # a standby, or a start, that can't be mistaken for on
             if self._in_cooldown():
                 power = PowerState.ON if seen == PowerState.ON else PowerState.COOLING
             elif self._sent_on is not None and now - self._sent_on < self.cfg.warmup_seconds:
@@ -456,9 +482,16 @@ class BridgeCore:
             if not self._start_held():
                 self._started_at = None
         elif self._started_at is None and (
-                (power == PowerState.WARMING and prev in (PowerState.OFF, PowerState.COOLING, PowerState.UNKNOWN))
+                (power == PowerState.WARMING and prev != PowerState.WARMING)  # from on too: see _since_cut
                 or (power == PowerState.ON and prev in (PowerState.OFF, PowerState.COOLING))):
             self._started_at = now  # out of standby without us: its remote, or its own button
+            if power == PowerState.WARMING and self._power_query_lies:
+                # As it looks while it boots after a power cut, too: then the log can tell which it was.
+                log.info("only the projector's power query answers, and the bridge didn't start it: its remote or "
+                         "its own button did, or it's booting after a power blip")
+            else:
+                log.info("the projector is %s, and the bridge didn't start it: its remote or its own button did",
+                         "starting up" if power == PowerState.WARMING else "on")
         self.state.set_power(power)
         self._confirmed_at = now
         return power
@@ -557,6 +590,7 @@ class BridgeCore:
                     log.info("dropping queued %s: superseded by power %s", [p.op for p in waiting], want)
             if want == "ON":
                 if power == PowerState.ON:
+                    self._check_not_cold(power)
                     return False
                 if power == PowerState.WARMING or self._start_held():
                     if self._seen == PowerState.OFF and not self._start_confirmed:
@@ -572,6 +606,7 @@ class BridgeCore:
                 self.proj.power_on()
                 self.state.set_power(PowerState.WARMING)
                 self._sent_on, self._sent_off, self._start_confirmed = time.monotonic(), None, False
+                self._since_cut = False
                 self._started_at = self._sent_on
                 if self._power_query_lies:
                     self._confirm_start()
@@ -597,6 +632,7 @@ class BridgeCore:
                 return self._defer({"op": "input", "value": d.alexa}, PowerState.ON, cmd_id)
             if power == PowerState.WARMING or queued:
                 return self._defer({"op": "input", "value": d.alexa}, PowerState.ON, cmd_id)
+            self._check_not_cold(power)
             self._select_input(d.alexa)
             return False
 
@@ -611,6 +647,14 @@ class BridgeCore:
             return False
 
         raise BridgeError("INVALID_DIRECTIVE", f"unknown op {kind!r}")
+
+    def _check_not_cold(self, power: PowerState) -> None:
+        """After a power cut, the X100-4K's standby can answer just like on: until a reading has shown it in
+        standby or starting, "on" isn't believed, and nothing is sent that would need it to be on."""
+        if self._power_query_lies and self._since_cut and power == PowerState.ON:
+            raise BridgeError("NOT_IN_OPERATION", "the projector looks on, but after a power cut its standby can "
+                              "look just the same, so the bridge has sent nothing. If it isn't on, start it with "
+                              "its remote this once: after that the bridge can tell again")
 
     @staticmethod
     def _validate(kind: str, value: Any) -> None:
@@ -699,7 +743,8 @@ class BridgeCore:
     # ------------------------------------------------------------------ polling
     def _fast_poll(self) -> None:
         self._fast_until = time.monotonic() + self.cfg.fast_poll_window
-        self._next_poll = min(self._next_poll, time.monotonic() + self.cfg.fast_poll_interval)
+        self._next_full_poll = min(self._next_full_poll, time.monotonic() + self.cfg.fast_poll_interval)
+        self._next_poll = min(self._next_poll, self._next_full_poll)
 
     def poll(self) -> None:
         if self.cfg.one_way:
@@ -709,6 +754,8 @@ class BridgeCore:
             self._next_poll = self._quiet_until  # it has only just got power back: not a word
         elif self._link_down():
             self._probe_link()
+        elif self._checking_power() and (self._in_standby() or time.monotonic() < self._next_full_poll):
+            self._check_power()
         else:
             self._refresh_quietly()
             if self._link_down():  # unanswered: check again shortly, asking only about power
@@ -722,7 +769,33 @@ class BridgeCore:
         now = time.monotonic()
         busy = self.pending or self.state.power in (PowerState.WARMING, PowerState.COOLING)
         fast = busy or now < self._fast_until
-        self._next_poll = now + (self.cfg.fast_poll_interval if fast else self.cfg.poll_interval)
+        self._next_full_poll = now + (self.cfg.fast_poll_interval if fast else self.cfg.poll_interval)
+        self._next_poll = self._next_full_poll
+        if self._checking_power():
+            self._next_poll = min(self._next_poll, now + self.cfg.power_check_seconds)
+
+    def _checking_power(self) -> bool:
+        """An X100-4K: in standby, only the power query; when it's on, that between full polls (see Config)."""
+        return self._power_query_lies and self.state.connected and self.cfg.power_check_seconds > 0
+
+    def _in_standby(self) -> bool:
+        """As far as the bridge can tell, and not just seen starting: its answers dip as it starts."""
+        return self.state.power == PowerState.OFF and not self._start_held()
+
+    def _check_power(self) -> None:
+        """Just the power query, which the X100-4K answers even while it boots. If it goes unanswered, it
+        may have lost power, however briefly: from then on it's treated as after a power cut."""
+        now = time.monotonic()
+        try:
+            self.proj.power_probe()
+        except ProjectorError as exc:
+            log.warning("projector unreachable: %s", exc)
+            self._link_failed()
+            self._next_poll = now + self.cfg.fast_poll_interval  # ask again shortly, still only about power
+            return
+        self._next_poll = now + self.cfg.power_check_seconds
+        if not self._in_standby():
+            self._next_poll = min(self._next_poll, self._next_full_poll)
 
     # ------------------------------------------------------------------ the link to the projector
     def _quiet(self) -> bool:
@@ -778,6 +851,7 @@ class BridgeCore:
         self._lost_since = None
         self._sent_on = self._sent_off = self._started_at = None
         self._start_confirmed = False
+        self._since_cut, self._confirmed_at = True, 0.0  # no reading from before the cut counts now
         self.state.set_power(PowerState.OFF)  # it comes back in standby
         self._quiet_for(self.cfg.power_up_quiet_seconds)
 

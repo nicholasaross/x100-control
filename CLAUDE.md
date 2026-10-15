@@ -54,15 +54,24 @@ the wall.
 - **Its power query always answers "on", even in standby.** The bridge tells standby, start-up and
   on apart from the other answers:
   - In standby, volume and mute answer but input doesn't.
-  - While starting from standby, only the power query answers, for 30–50 s. Polling during a normal
-    start-up is safe.
+  - While starting from standby, only the power query answers, for 30–70 s (67 s on 15 October).
+    Just before it comes on, it can answer mute on, then input 0x01, for a few seconds. Polling during
+    a normal start-up is safe.
 - **After mains power returns, it hangs if it's asked anything except the power query.**
   - For about 25–30 s its main processor boots and only the power query answers. Then it gives odd
     values (mute on, volume 0/16, input 0x10) and flips between standby and starting.
   - Any other question in that window hangs it. Hung, it sits in standby, acknowledges "on" without
     starting, and ignores its remote and its own button. It stays that way until it has been off at
     the wall and then boots undisturbed.
-  - Silent power-ups were fine (tested twice).
+  - Silent power-ups were fine (twice before, and twice more on 15 October). It says nothing
+    unprompted as it powers up: `x100ctl listen` heard nothing across a 10 s cut on 15 October.
+  - Afterwards, its standby sometimes answers everything as if it were on (input HDMI 1, volume 9,
+    mute off) until it's next started. Nothing the bridge can ask tells that standby from on. Seen 8
+    and 13 minutes after one power-up on 15 October, but not 9 minutes after the next. Its remote
+    starts it from there. Whether a serial "on" does is untested.
+  - A cut short enough to fall between two polls looks like nothing happened: it answers again by the
+    next poll, and booting looks just like starting up. In the simulator, that poll's question about
+    the input hangs it. This is the likeliest cause of the 14 October hang, but it's unproven.
 - **An "off" 66 s after "on", just as the picture appeared, also hung it.**
 - So the bridge:
   - **After any failed reading:** asks only the power query, 2 s after the first failure and then
@@ -72,6 +81,24 @@ the wall.
     when.
   - **When the Pi has been up for less than 300 s:** starts the same way, since the Pi and the
     projector may have shared the power cut.
+  - **In standby:** asks only the power query, every 2 s (`X100_POWER_CHECK_SECONDS`), and asks the
+    rest only when a command comes. When it's on, the same check runs between the 30 s polls. Any
+    cut longer than about 2 s is then seen, and gets the 300 s quiet.
+    - The price: a remote start from standby goes unseen until the next command, so an "off" then
+      waits the full 120 s, and "on" takes about a second longer, as the bridge reads first.
+    - Still at risk: a command within 300 s of a cut too short to see.
+  - **Is told it's an X100-4K** by `X100_QUIRKS=true` in bridge.env. Without it, the bridge learns
+    that from the first reading that shows a standby or a start. After a power cut that can take until
+    the projector is next started, and none of these rules apply until then. install.sh keeps an
+    existing bridge.env, so Nick's needs the line adding by hand.
+  - **After a power cut, or once the Pi has started:** until a reading shows a standby or a start, a
+    reading of "on" isn't believed for "on" or an input. They get NOT_IN_OPERATION, saying to start
+    it with its remote this once, and nothing is sent. "Off" goes out as usual.
+  - **Counts a start seen from what looked like on** (that standby), so an "off" after it is held as
+    usual. For the 120 s after any start it has seen, it keeps reading everything, not just the power
+    query, because its answers dip like standby as it starts.
+  - **Logs a start it didn't ask for.** When only the power query answers, that line can't tell a
+    remote start from a boot after a blip, but it shows what the projector looked like before a hang.
   - **For 120 s after a start (`X100_START_HOLD_SECONDS`):** sends no power command. An "off"
     waits, and a repeated "on" isn't sent.
   - **Never resends "on" by itself.** 2 s after "on" it checks whether volume still answers. If it
@@ -83,7 +110,8 @@ the wall.
   - `x100ctl trace --power-only` asks only the power query.
   - Plain `trace` asks everything, which hangs it while it boots.
 - **`x100/mock.py` reproduces all of this in quirks mode,** through `hang_if_asked_while_booting`,
-  `hang_if_off_within`, `power_cut()`, `power_restored()` and `boot_seconds`. Any change to power
+  `hang_if_off_within`, `cold_standby_after_power_up`, `power_cut()`, `power_restored()` and
+  `boot_seconds`. Any change to power
   handling needs a test in `tests/test_power_quirks.py` that first shows the hazard in the
   simulator, then shows it prevented.
 
@@ -111,7 +139,7 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - **The `test` extra needs Python 3.10 or later,** because amqtt does. A Mac's built-in `python3`
   may be 3.9.
 - **To test on 3.9,** install the package with `pytest` instead of the extra. The MQTT and listener
-  tests then skip: 160 passed and 14 skipped last time.
+  tests then skip: 169 passed and 14 skipped last time.
 - **Other skips need setting up first.** The Alexa schema tests and the real-speech tests skip until
   that's done, as tests/README.md describes.
 
@@ -161,13 +189,23 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - The old private repo, `nicholasaross/x100-control-private`, is archived. Don't push to it. The
   merge messages for "pull request #1" and "#2" in `main`'s early history refer to PRs there.
 
-## Open items (as of 2026-10-14)
+## Open items (as of 2026-10-15)
 
-- **Build 94bd0861 (tag `build-94bd0861`) still needs Nick's power-cut test on the real
-  projector.**
-  1. With the services running, he switches the projector off at the wall.
-  2. The bridge log should say it "isn't answering".
-  3. After he switches it back on, the log should say "answering again … leaving it alone until …".
-  4. After that time, "Hey Jarvis, projector on" should start it.
-- **If it hangs anyway,** the lone power query is itself harmful while it boots. The next step is
-  `x100ctl listen` during a power-up, to see what the projector says unprompted.
+- **The hang on 14 October, under build 94bd0861.** At 18:38 the first voice "on" was acknowledged,
+  but the projector stayed in standby, and it needed a wall power-cycle. Nick hadn't used the remote
+  that afternoon or noticed any flicker. Since the "off" at 11:44 the bridge had only polled standby,
+  and no reading failed. A blip between polls is the likeliest cause; the projector hanging by
+  itself under standby polls is the other. The standby checks above guard against the first, and
+  ask less in standby, which can only help with the second. The start log line would show next
+  time what it looked like. They still need a build, Nick's install, and `X100_QUIRKS=true` adding
+  to his bridge.env.
+- **Build 94bd0861's power-cut handling worked** at 18:39–18:46 on 14 October: "isn't answering",
+  then "answering again … leaving it alone until 18:46:00", a voice "on" refused meanwhile, and a
+  normal start after that.
+- **Untested: a serial "on" from the standby that looks on** after a power cut. Until it's known to
+  be safe, the bridge refuses "on" there and asks for the remote. To test it, stop the bridge, cut
+  the power at the wall for 10 s, and after 8 minutes, if `x100ctl trace` shows "on" with the
+  projector in standby, run `trace on`. That state came after only one of two power-ups.
+- **Not yet shown on the real projector:** that the power query every 2 s is harmless while it boots.
+  So far only a single power query during a boot is known to be fine. `x100ctl trace --power-only
+  --interval 2` across a power-up would show it.

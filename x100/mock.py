@@ -7,7 +7,9 @@ refused while in standby or warming up, mute only while showing an input.
 ``quirks=True`` (``--x100-quirks``) behaves like the real X100-4K as traced over
 RS-232: its power query says ON in standby and while starting up, in standby it
 answers only volume and mute besides, while starting up it answers nothing else
-for most of the warm-up, and it doesn't answer "off" when it's already off.
+for most of the warm-up, and it doesn't answer "off" when it's already off. After a power cut it
+can hang (``hang_if_asked_while_booting``), and its standby can then look just like on
+(``cold_standby_after_power_up``).
 
 Run it standalone to rehearse the whole stack before touching the projector::
 
@@ -82,6 +84,10 @@ class MockState:
     restored_at: float = 0.0         # when it was last switched back on at the wall
     boot_seconds: float = 0.0        # after power returns, only the power query answers this long
     hang_if_asked_while_booting: bool = False  # ...and any other question then hangs it
+    # After one power-up of two traced, its standby then answered everything as if it were on (input,
+    # volume, mute) until it was started, so nothing could tell that standby from on.
+    cold_standby_after_power_up: bool = False
+    cold: bool = False               # in that standby now
     drop_replies: int = 0            # say nothing to this many requests (a missed reply)
     sources: Dict[int, str] = field(default_factory=lambda: dict(MOCK_SOURCES))
     keys: List[int] = field(default_factory=list)
@@ -108,6 +114,7 @@ class MockState:
             self.started = time.monotonic()
             self.until = self.started + self.warmup
             self.muted = False
+            self.cold = False
 
     def turn_off(self) -> None:
         self.tick()
@@ -119,10 +126,11 @@ class MockState:
 
     def power_cut(self) -> None:
         """Switched off at the wall: silent until power_restored(), and no longer hung."""
-        self.powered, self.hung, self.power = False, False, PowerState.OFF
+        self.powered, self.hung, self.power, self.cold = False, False, PowerState.OFF, False
 
     def power_restored(self) -> None:
         self.powered, self.restored_at = True, time.monotonic()
+        self.cold = self.cold_standby_after_power_up
 
     def booting(self) -> bool:
         return bool(self.restored_at) and time.monotonic() - self.restored_at < self.boot_seconds
@@ -160,6 +168,8 @@ def quirky_reply(state: MockState, write: bool, c1: int, c2: int) -> Optional[by
     if not write and (c1, c2) == (0x11, 0x00):
         return _reply(1)  # "on", whatever it's doing
     volume_or_mute = not write and (c1, c2) in ((0x14, 0x03), (0x14, 0x00))
+    if power == PowerState.OFF and state.cold and not write:
+        return None  # the standby after some power-ups: it answers as if on
     if power in (PowerState.OFF, PowerState.COOLING):
         return None if volume_or_mute else SILENCE  # standby: only volume and mute still answer
     if power == PowerState.WARMING:
