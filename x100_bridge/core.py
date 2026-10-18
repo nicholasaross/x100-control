@@ -279,9 +279,10 @@ class BridgeCore:
         self._lost_since: Optional[float] = None
         self._lost_said = False                 # logged that it isn't answering
         self._quiet_until = 0.0
-        # Since a power cut (or this computer starting), not yet seen in standby or starting: its standby
-        # can then answer just like on, so a reading that says "on" may be wrong.
-        self._since_cut = False
+        # After a power cut its standby can answer just like on, for hours. So since a cut, or since the
+        # bridge started (it can't know what happened before), until it's seen in standby or starting, a
+        # reading that says "on" may be wrong. Holds what it's been doubted since, or "" once it can tell.
+        self._doubt_on = ""
         self._uptime = uptime
 
     # ------------------------------------------------------------------ intake
@@ -327,10 +328,11 @@ class BridgeCore:
     def start(self) -> None:
         if self._power_query_lies:
             self._say_quirky("X100_QUIRKS is set")
+        self._doubt_on = "the bridge started"
         up = self._uptime() if self._uptime is not None else None
         if up is not None and up < self.cfg.power_up_quiet_seconds:
             self._quiet_for(self.cfg.power_up_quiet_seconds - up)
-            self._since_cut = True
+            self._doubt_on = "this computer started"
             log.info("this computer started %.0f s ago, perhaps with the projector after a power cut: leaving the "
                      "projector alone until %s, as questions while it boots can hang it", up, self._quiet_end())
         self._thread = threading.Thread(target=self._run, name="bridge-core", daemon=True)
@@ -468,7 +470,7 @@ class BridgeCore:
         adjusted = ""  # why the bridge takes it as something other than the reading, for the log
         if self._power_query_lies:
             if seen in (PowerState.OFF, PowerState.WARMING):
-                self._since_cut = False  # a standby, or a start, that can't be mistaken for on
+                self._doubt_on = ""  # a standby, or a start, that can't be mistaken for on
             if self._in_cooldown():
                 power = PowerState.ON if seen == PowerState.ON else PowerState.COOLING
                 adjusted = "the bridge has just sent 'off'"
@@ -487,7 +489,7 @@ class BridgeCore:
             if not self._start_held():
                 self._started_at = None
         elif self._started_at is None and (
-                (power == PowerState.WARMING and prev != PowerState.WARMING)  # from on too: see _since_cut
+                (power == PowerState.WARMING and prev != PowerState.WARMING)  # from on too: see _doubt_on
                 or (power == PowerState.ON and prev in (PowerState.OFF, PowerState.COOLING))):
             self._started_at = now  # out of standby without us: its remote, or its own button
             if power == PowerState.WARMING and self._power_query_lies:
@@ -621,7 +623,7 @@ class BridgeCore:
                 self.proj.power_on()
                 self._set_power(PowerState.WARMING, "the bridge sent 'on'")
                 self._sent_on, self._sent_off, self._start_confirmed = time.monotonic(), None, False
-                self._since_cut = False
+                self._doubt_on = ""
                 self._started_at = self._sent_on
                 if self._power_query_lies:
                     self._confirm_start()
@@ -664,11 +666,12 @@ class BridgeCore:
         raise BridgeError("INVALID_DIRECTIVE", f"unknown op {kind!r}")
 
     def _check_not_cold(self, power: PowerState) -> None:
-        """After a power cut, the X100-4K's standby can answer just like on: until a reading has shown it in
-        standby or starting, "on" isn't believed, and nothing is sent that would need it to be on."""
-        if self._power_query_lies and self._since_cut and power == PowerState.ON:
+        """After a power cut, the X100-4K's standby can answer just like on (see _doubt_on): until a reading
+        has shown it in standby or starting, "on" isn't believed, and nothing is sent that would need it on."""
+        if self._power_query_lies and self._doubt_on and power == PowerState.ON:
             raise BridgeError("NOT_IN_OPERATION", "the projector looks on, but after a power cut its standby can "
-                              "look just the same, so the bridge has sent nothing. If it isn't on, start it with "
+                              "look just the same, and it hasn't been seen in standby or starting since "
+                              f"{self._doubt_on}, so the bridge has sent nothing. If it isn't on, start it with "
                               "its remote this once: after that the bridge can tell again")
 
     @staticmethod
@@ -866,7 +869,7 @@ class BridgeCore:
         self._lost_since = None
         self._sent_on = self._sent_off = self._started_at = None
         self._start_confirmed = False
-        self._since_cut, self._confirmed_at = True, 0.0  # no reading from before the cut counts now
+        self._doubt_on, self._confirmed_at = "a power cut", 0.0  # no reading from before the cut counts now
         self._set_power(PowerState.OFF, "answering again after a cut: it comes back in standby")
         self._quiet_for(self.cfg.power_up_quiet_seconds)
 
