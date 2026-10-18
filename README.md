@@ -238,7 +238,9 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
   Asked anything else then (the bridge polling it, or `x100ctl trace`), it hung every time, whether it
   had been on or in standby before the cut. Hung, it sits in standby and won't start, not even from
   its own remote, until it has been switched off at the wall again. Left alone, it started fine. It
-  also hung after an "off" 66 s after "on", just after the picture appeared. So the bridge:
+  also hung after an "off" 66 s after "on", just after the picture appeared, and again after "off"s
+  6 and 17 minutes after a start. Until that's understood, **leave it on for at least 90 minutes
+  before switching it off**. So the bridge:
   * asks only the power question once the projector stops answering, every 30 s, and when it answers
     again sends nothing at all for 5 minutes. Commands in that time get the two falling notes, and
     the log says until when; the remote works once the projector has started up;
