@@ -12,13 +12,19 @@ changing anything.
     USB adapter (`/dev/serial/by-id/usb-FTDI_USB_Serial_Converter_FTF4MRDZ-if00-port0`), and
     serves the local HTTP API on 127.0.0.1:8661.
   - **`x100-listener`** hears "Hey Jarvis" (openWakeWord), then "projector on/off" (a sherpa-onnx
-    keyword spotter), and posts the command to the bridge. The mic is a Jabra Speak 510 (`hw:2,0`,
-    16 kHz mono), whose speaker plays the chimes.
+    keyword spotter), and posts the command to the bridge. The mic is a Jabra Speak 510 (16 kHz
+    mono), whose speaker plays the chimes. The listener finds it by name: it was `hw:2,0`, and
+    `hw:1,0` after a reboot on 18 October.
 - Nick logs in as `x100-controller`; the services run as `x100`.
 - `deploy/install.sh` puts the code in `/opt/x100-control`, with a Python 3.11 venv in `.venv`.
 - Settings live in `/opt/x100-control/bridge.env` and `listener.env`. They hold the API token, so
   they never go in the repo, and neither do certs/, models/, clips/ or config/inputs.json.
 - Logs: `journalctl -u x100-bridge -u x100-listener -f` on the Pi.
+  - Since 18 October they survive reboots, through `/etc/systemd/journald.conf.d/50-persistent.conf`
+    (`Storage=persistent`, `SystemMaxUse=200M`). Raspberry Pi OS otherwise keeps them in memory only,
+    which is how the logs of a crash between 16 and 18 October were lost.
+  - The Pi has had its official power supply since 18 October. Before that it logged undervoltage
+    many times an hour.
 - Only one program can have the serial port at a time. To use `x100ctl` on the Pi, first run
   `sudo systemctl stop x100-bridge`, then from `/opt/x100-control`:
   `sudo -u x100 .venv/bin/x100ctl --env-file bridge.env <command>`.
@@ -71,8 +77,18 @@ the wall.
     starts it from there. Whether a serial "on" does is untested.
   - A cut short enough to fall between two polls looks like nothing happened: it answers again by the
     next poll, and booting looks just like starting up. In the simulator, that poll's question about
-    the input hangs it. This is the likeliest cause of the 14 October hang, but it's unproven.
+    the input hangs it. It was first blamed for the 14 October hang, but an early "off" now looks
+    likelier (below).
 - **An "off" 66 s after "on", just as the picture appeared, also hung it.**
+- **So did "off"s 17 and 6 minutes after a start** (14 and 15 October). Each time it looked like
+  standby afterwards, and the next "on", 7 hours and 1 hour later, was acknowledged without starting.
+  - "Off"s after 84 minutes and after about 2 hours were fine.
+  - It's not yet known whether the "off" itself does it, or the bridge's questions while the main
+    processor shuts down after it (build 94bd0861 asked input, volume and mute about 27 times in the
+    first minute after an "off"; e776ca5b asks once). See the open items for the test that tells
+    them apart.
+  - Until then Nick leaves it on for at least 90 minutes before any "off". The 120 s
+    `X100_START_HOLD_SECONDS` below is far too short, but hasn't been changed yet.
 - So the bridge:
   - **After any failed reading:** asks only the power query, 2 s after the first failure and then
     every 30 s (`X100_OUTAGE_PROBE_SECONDS`).
@@ -99,6 +115,9 @@ the wall.
     query, because its answers dip like standby as it starts.
   - **Logs a start it didn't ask for.** When only the power query answers, that line can't tell a
     remote start from a boot after a blip, but it shows what the projector looked like before a hang.
+  - **Logs every change in the power state it acts on,** as `projector: OFF -> WARMING (why)`. The
+    reason is a command it sent, a reading with what the projector answered, or a cut. The first
+    reading after starting has its own line instead ("projector reachable").
   - **For 120 s after a start (`X100_START_HOLD_SECONDS`):** sends no power command. An "off"
     waits, and a repeated "on" isn't sent.
   - **Never resends "on" by itself.** 2 s after "on" it checks whether volume still answers. If it
@@ -139,7 +158,7 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - **The `test` extra needs Python 3.10 or later,** because amqtt does. A Mac's built-in `python3`
   may be 3.9.
 - **To test on 3.9,** install the package with `pytest` instead of the extra. The MQTT and listener
-  tests then skip: 169 passed and 14 skipped last time.
+  tests then skip: 171 passed and 14 skipped last time.
 - **Other skips need setting up first.** The Alexa schema tests and the real-speech tests skip until
   that's done, as tests/README.md describes.
 
@@ -189,19 +208,21 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - The old private repo, `nicholasaross/x100-control-private`, is archived. Don't push to it. The
   merge messages for "pull request #1" and "#2" in `main`'s early history refer to PRs there.
 
-## Open items (as of 2026-10-15)
+## Open items (as of 2026-10-18)
 
-- **The hang on 14 October, under build 94bd0861.** At 18:38 the first voice "on" was acknowledged,
-  but the projector stayed in standby, and it needed a wall power-cycle. Nick hadn't used the remote
-  that afternoon or noticed any flicker. Since the "off" at 11:44 the bridge had only polled standby,
-  and no reading failed. A blip between polls is the likeliest cause; the projector hanging by
-  itself under standby polls is the other. The standby checks above guard against the first, and
-  ask less in standby, which can only help with the second. The start log line would show next
-  time what it looked like. They still need a build, Nick's install, and `X100_QUIRKS=true` adding
-  to his bridge.env.
-- **Build 94bd0861's power-cut handling worked** at 18:39–18:46 on 14 October: "isn't answering",
-  then "answering again … leaving it alone until 18:46:00", a voice "on" refused meanwhile, and a
-  normal start after that.
+- **Early "off"s hang it** (see the quirks above). This explains the 14 and 15 October hangs better
+  than a mains blip. What to find out first:
+  1. Whether it's the "off" itself or the questions after it. With the bridge stopped, start it
+     with the remote. 6 minutes later, run `x100ctl trace off --power-only --seconds 300 --interval
+     2`. Then press the remote's power button once. If it starts, the "off" alone didn't hang it.
+  2. Then the safe time after a start, or a fix that makes voice "off" safe at any time: for
+     example, asking only the power query for some minutes after any "off".
+  - Any change to the start hold or to what's asked after an "off" needs Nick's agreement and a
+    hazard-then-prevented test.
+- **A crash between 16 and 18 October** happened under e776ca5b, before the journal was persistent.
+  Nick doesn't remember the details, so it can't be placed.
+- **build-e776ca5b isn't tagged yet.** It's installed (15 October, with `X100_QUIRKS=true`), but no
+  voice "on" has been seen to work on it since. Tag it, or its successor, once one has.
 - **Untested: a serial "on" from the standby that looks on** after a power cut. Until it's known to
   be safe, the bridge refuses "on" there and asks for the remote. To test it, stop the bridge, cut
   the power at the wall for 10 s, and after 8 minutes, if `x100ctl trace` shows "on" with the

@@ -236,7 +236,7 @@ def test_a_start_the_bridge_didnt_ask_for_is_logged(caplog):
         ours.state.set_power(PowerState.WARMING)
         ours._sent_on = ours._started_at = time.monotonic()  # as after the bridge's own "on"
         ours._settle_power(PowerState.WARMING)
-    said = [r.getMessage() for r in caplog.records]
+    said = [r.getMessage() for r in caplog.records if not r.getMessage().startswith("projector: ")]
     assert len(said) == 2  # once per start, and not for its own
     assert "only the projector's power query answers" in said[0] and "booting after a power blip" in said[0]
     assert said[1].startswith("the projector is on, and the bridge didn't start it")
@@ -250,6 +250,41 @@ def test_by_the_book_projectors_are_taken_at_their_word():
 
 
 # ---------------------------------------------------------------------------- the bridge, end to end
+
+
+def power_changes(caplog):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("projector: ")]
+
+
+def test_each_change_in_power_is_logged_with_what_it_answered(x100, caplog):
+    """So that after an incident the log shows what the projector looked like, and when."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core = bridge(x100, start_hold_seconds=0)  # the simulator doesn't mind an early "off" here
+    try:
+        assert power_changes(caplog) == []  # the first reading has its own line ("projector reachable")
+        assert core.submit_and_wait(ON)["ok"]
+        assert wait_for(lambda: core.state.power == PowerState.ON and mock_power(x100) == PowerState.ON)
+        assert wait_for(lambda: not core._settling())
+        assert core.submit_and_wait([{"op": "power", "value": "OFF"}])["ok"]
+        assert wait_for(lambda: core.state.power == PowerState.OFF)
+        said = power_changes(caplog)
+        assert said[0] == "projector: OFF -> WARMING (the bridge sent 'on')"
+        assert "projector: WARMING -> ON (reading ON)" in said
+        assert "projector: ON -> COOLING (the bridge sent 'off')" in said
+        assert said[-1] == ("projector: COOLING -> OFF (reading OFF (standby: its power query says ON, but it "
+                            "doesn't answer about its input))")
+    finally:
+        core.stop()
+
+
+def test_a_reading_the_bridge_takes_as_something_else_says_why(caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core, _ = rules()
+    core.state.set_power(PowerState.OFF)
+    core._sent_on = time.monotonic() - 10
+    core._settle_power(PowerState.OFF)  # it looks like standby, but it was only switched on 10 s ago
+    assert power_changes(caplog) == [
+        "projector: OFF -> WARMING (reading OFF, taken as WARMING: the bridge sent 'on' 10 s ago)"]
 
 
 def test_on_from_standby_goes_straight_out_and_is_ok_once_it_has_started(x100):
@@ -618,7 +653,8 @@ def test_in_standby_a_short_cut_is_seen_and_it_is_left_alone(x100):
         core.stop()
 
 
-def test_when_its_on_a_cut_between_polls_is_seen_too(x100):
+def test_when_its_on_a_cut_between_polls_is_seen_too(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
     booting_x100(x100)
     core = bridge(x100, fast_poll_window=0, **dict(POWER_CUT, poll_interval=30))  # it learns its ways in standby
     try:
@@ -629,6 +665,7 @@ def test_when_its_on_a_cut_between_polls_is_seen_too(x100):
         assert wait_for(lambda: not core._quiet(), limit=3)
         assert [e for e in x100.state.log if "(booting)" in e] == ["R 11 00 (booting)"]
         assert not x100.state.hung and core.state.power == PowerState.OFF  # it comes back in standby
+        assert "projector: ON -> OFF (answering again after a cut: it comes back in standby)" in power_changes(caplog)
     finally:
         core.stop()
 

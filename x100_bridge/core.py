@@ -272,6 +272,7 @@ class BridgeCore:
         self._confirmed_at = 0.0                # when a reading last confirmed the power state
         self._started_at: Optional[float] = None  # when it last came out of standby, if we know
         self._seen = PowerState.UNKNOWN         # the latest reading, before _settle_power's adjustments
+        self._last_reading: Optional[PowerReading] = None  # what it answered, for the log
         self._start_confirmed = False           # our last "on" was seen to start it
         # The link: it stopped answering (power queries only, now and then), or it has just started
         # answering again and may be booting (silence).
@@ -439,6 +440,7 @@ class BridgeCore:
             s.volume = reading.volume
         if reading.muted is not None:
             s.muted = reading.muted
+        self._last_reading = reading
         return reading
 
     def _say_quirky(self, why: str) -> None:
@@ -463,12 +465,15 @@ class BridgeCore:
         now = time.monotonic()
         self._seen = seen
         power = seen
+        adjusted = ""  # why the bridge takes it as something other than the reading, for the log
         if self._power_query_lies:
             if seen in (PowerState.OFF, PowerState.WARMING):
                 self._since_cut = False  # a standby, or a start, that can't be mistaken for on
             if self._in_cooldown():
                 power = PowerState.ON if seen == PowerState.ON else PowerState.COOLING
+                adjusted = "the bridge has just sent 'off'"
             elif self._sent_on is not None and now - self._sent_on < self.cfg.warmup_seconds:
+                adjusted = f"the bridge sent 'on' {now - self._sent_on:.0f} s ago"
                 if seen == PowerState.ON:
                     power = PowerState.ON
                 elif self.state.power == PowerState.ON:
@@ -492,9 +497,19 @@ class BridgeCore:
             else:
                 log.info("the projector is %s, and the bridge didn't start it: its remote or its own button did",
                          "starting up" if power == PowerState.WARMING else "on")
-        self.state.set_power(power)
+        reading = self._last_reading
+        looked = reading.describe() if reading is not None and reading.state == seen else seen.value
+        self._set_power(power, f"reading {looked}" + (f", taken as {power.value}: {adjusted}" if power != seen else ""))
         self._confirmed_at = now
         return power
+
+    def _set_power(self, power: PowerState, why: str) -> None:
+        """Every change in the power state the bridge acts on goes through here, and into the log: after an
+        incident, that shows what the projector looked like and when."""
+        old = self.state.power
+        if power != old and old != PowerState.UNKNOWN:  # the first reading has its own line
+            log.info("projector: %s -> %s (%s)", old.value, power.value, why)
+        self.state.set_power(power)
 
     def _settling(self) -> bool:
         """Only just on after starting up: the X100-4K's answers keep changing for a few seconds."""
@@ -530,7 +545,7 @@ class BridgeCore:
         if self.pjlink is not None:
             try:
                 power = self.pjlink.power()
-                self.state.set_power(power)
+                self._set_power(power, "PJLink says so")
                 self.state.connected = True
                 return power
             except PJLinkError as exc:
@@ -538,9 +553,9 @@ class BridgeCore:
         s = self.state
         elapsed = time.monotonic() - s.power_since
         if s.power == PowerState.WARMING and elapsed >= self.cfg.warmup_seconds:
-            s.set_power(PowerState.ON)
+            self._set_power(PowerState.ON, "one-way: its warm-up time has passed")
         elif s.power == PowerState.COOLING and elapsed >= self.cfg.cooldown_seconds:
-            s.set_power(PowerState.OFF)
+            self._set_power(PowerState.OFF, "one-way: its cool-down time has passed")
         return s.power
 
     def _defer(self, op: Dict[str, Any], wait_for: PowerState, cmd_id: str) -> bool:
@@ -604,7 +619,7 @@ class BridgeCore:
                 if power == PowerState.COOLING:
                     return self._defer(op, PowerState.OFF, cmd_id)
                 self.proj.power_on()
-                self.state.set_power(PowerState.WARMING)
+                self._set_power(PowerState.WARMING, "the bridge sent 'on'")
                 self._sent_on, self._sent_off, self._start_confirmed = time.monotonic(), None, False
                 self._since_cut = False
                 self._started_at = self._sent_on
@@ -617,7 +632,7 @@ class BridgeCore:
                 return self._defer(op, PowerState.ON, cmd_id)
             self.pending.clear()  # nothing queued should run after we turn off
             self.proj.power_off()
-            self.state.set_power(PowerState.COOLING)
+            self._set_power(PowerState.COOLING, "the bridge sent 'off'")
             self._sent_off, self._sent_on, self._started_at = time.monotonic(), None, None
             return False
 
@@ -852,7 +867,7 @@ class BridgeCore:
         self._sent_on = self._sent_off = self._started_at = None
         self._start_confirmed = False
         self._since_cut, self._confirmed_at = True, 0.0  # no reading from before the cut counts now
-        self.state.set_power(PowerState.OFF)  # it comes back in standby
+        self._set_power(PowerState.OFF, "answering again after a cut: it comes back in standby")
         self._quiet_for(self.cfg.power_up_quiet_seconds)
 
     def _refresh_quietly(self) -> None:
