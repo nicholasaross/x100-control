@@ -107,9 +107,12 @@ the wall.
     that from the first reading that shows a standby or a start. After a power cut that can take until
     the projector is next started, and none of these rules apply until then. install.sh keeps an
     existing bridge.env, so Nick's needs the line adding by hand.
-  - **After a power cut, or once the Pi has started:** until a reading shows a standby or a start, a
-    reading of "on" isn't believed for "on" or an input. They get NOT_IN_OPERATION, saying to start
-    it with its remote this once, and nothing is sent. "Off" goes out as usual.
+  - **After a power cut, or whenever the bridge starts:** until a reading shows a standby or a start,
+    a reading of "on" isn't believed for "on" or an input. They get NOT_IN_OPERATION, saying since
+    when and to start it with its remote this once, and nothing is sent. "Off" goes out as usual.
+    - Any start counts, not just the Pi's: on 18 October a restart for a new build found that
+      standby, hours after a wall power-cycle, and took it for on.
+    - The price: after a restart while it really is on, "on" gets that answer instead of "ok".
   - **Counts a start seen from what looked like on** (that standby), so an "off" after it is held as
     usual. For the 120 s after any start it has seen, it keeps reading everything, not just the power
     query, because its answers dip like standby as it starts.
@@ -158,7 +161,7 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - **The `test` extra needs Python 3.10 or later,** because amqtt does. A Mac's built-in `python3`
   may be 3.9.
 - **To test on 3.9,** install the package with `pytest` instead of the extra. The MQTT and listener
-  tests then skip: 171 passed and 14 skipped last time.
+  tests then skip: 173 passed and 14 skipped last time.
 - **Other skips need setting up first.** The Alexa schema tests and the real-speech tests skip until
   that's done, as tests/README.md describes.
 

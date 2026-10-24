@@ -713,7 +713,7 @@ def test_after_a_power_cut_a_standby_that_looks_on_gets_an_honest_answer(x100):
         assert not writes(x100, "W 11 00") and not writes(x100, "W 13 01")  # nothing sent
         with x100.state.lock:
             x100.state.turn_on()  # its remote, this once
-        assert wait_for(lambda: not core._since_cut, limit=3)  # seen starting: it can tell again
+        assert wait_for(lambda: not core._doubt_on, limit=3)  # seen starting: it can tell again
         assert wait_for(lambda: core.state.power == PowerState.ON and mock_power(x100) == PowerState.ON, limit=4)
         off = core.submit_and_wait([{"op": "power", "value": "OFF"}])
         assert off["ok"] and off["deferred"]  # it has only just started
@@ -742,6 +742,48 @@ def test_after_this_computer_starts_a_standby_that_looks_on_isnt_believed_either
         refused = core.submit_and_wait(ON)
         assert not refused["ok"] and "after a power cut" in refused["message"]
         assert not writes(x100, "W 11 00") and not x100.state.hung
+    finally:
+        core.stop()
+
+
+def test_a_restarted_bridge_doesnt_believe_a_standby_that_looks_on(x100):
+    """On 18 October the bridge was restarted (a new build) while the projector sat in the standby that looks
+    on, hours after a wall power-cycle. It took that for on, so a voice "on" would have got "ok" and sent
+    nothing. Now any start of the bridge counts like a power cut, until it sees a standby or a start."""
+    with x100.state.lock:
+        x100.state.cold = True  # that standby, from a power-up long before the bridge started
+    fooled = bridge(x100, expect=PowerState.ON, x100_quirks=True)
+    try:
+        fooled._doubt_on = ""  # as it was: only a power cut, or this computer starting, made it doubt "on"
+        result = fooled.submit_and_wait(ON)
+        assert result["ok"] and not writes(x100, "W 11 00") and mock_power(x100) == PowerState.OFF  # nothing
+    finally:
+        fooled.stop()
+    core = bridge(x100, expect=PowerState.ON, x100_quirks=True)
+    try:
+        refused = core.submit_and_wait(ON)
+        assert not refused["ok"] and "since the bridge started" in refused["message"]
+        assert "its remote this once" in refused["message"] and not writes(x100, "W 11 00")
+        with x100.state.lock:
+            x100.state.turn_on()  # its remote, this once
+        assert wait_for(lambda: not core._doubt_on, limit=3)  # seen starting: it can tell again
+        assert wait_for(lambda: core.state.power == PowerState.ON and mock_power(x100) == PowerState.ON, limit=4)
+        assert core.submit_and_wait(ON)["ok"]  # on, and believed now
+    finally:
+        core.stop()
+
+
+def test_after_a_restart_on_is_doubted_even_when_it_is_on_but_off_still_works(x100):
+    """The price: a bridge started while the projector really is on can't tell that from the standby that
+    looks on, so "on" gets the honest answer instead of "ok". "Off" goes out as usual."""
+    x100.state.power = PowerState.ON
+    core = bridge(x100, expect=PowerState.ON, x100_quirks=True)
+    try:
+        assert not core.submit_and_wait(ON)["ok"] and not writes(x100, "W 11 00")
+        time.sleep(0.6)  # past settle_seconds: an "off" isn't held for that
+        off = core.submit_and_wait([{"op": "power", "value": "OFF"}])
+        assert off["ok"] and not off["deferred"] and writes(x100, "W 11 01")
+        assert wait_for(lambda: core.state.power == PowerState.OFF and not core._doubt_on, limit=3)
     finally:
         core.stop()
 
