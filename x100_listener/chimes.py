@@ -1,6 +1,8 @@
 """Short tones that tell you what happened, without looking at anything.
 
     ok       two rising notes      the projector accepted the command
+    queued   two level notes       accepted, but it waits until the projector is ready (it has only just
+                                   started, say): nothing happens yet
     fail     two falling notes     the bridge or projector said no, or couldn't be reached
     unclear  one low note          heard "Hey Jarvis" but no command after it
     wake     one short blip        heard "Hey Jarvis" (off by default: it would talk over you)
@@ -23,6 +25,7 @@ log = logging.getLogger("x100.listener.chimes")
 NOTES = {"A4": 440.0, "C5": 523.25, "E5": 659.25, "A5": 880.0, "E4": 329.63, "C4": 261.63}
 CHIMES = {
     "ok": [("E5", 0.09), ("A5", 0.14)],
+    "queued": [("E5", 0.09), ("E5", 0.14)],
     "fail": [("A4", 0.12), ("E4", 0.2)],
     "unclear": [("C4", 0.16)],
     "wake": [("A5", 0.06)],

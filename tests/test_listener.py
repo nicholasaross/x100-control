@@ -120,6 +120,23 @@ class Rig:
 # ---------------------------------------------------------------------------- the state machine
 
 
+def test_a_queued_command_gets_its_own_chime():
+    """"ok" for an "off" the bridge holds until 2 minutes after a start made it seem nothing had happened, three
+    times in October. A queued command now sounds different: two level notes."""
+    rig = Rig(dispatch=lambda phrase: Result(True, deferred=True, seconds=0.05))
+    rig.play(SIL, SIL, WAKE, SIL, PRO, ON, SIL)
+    assert rig.chimes.played == ["queued"]
+    assert "queued until the projector is ready" in rig.events[-1].detail["outcome"]
+
+
+def test_every_chime_has_a_tone():
+    from x100_listener.chimes import CHIMES, duration, tone
+
+    for kind in ("ok", "queued", "fail", "unclear", "wake"):
+        assert kind in CHIMES and len(tone(kind, 16000)) > 0 and duration(kind) > 0
+    assert CHIMES["queued"] != CHIMES["ok"]
+
+
 def test_wake_then_command_dispatches_and_chimes_ok():
     rig = Rig()
     rig.play(SIL, SIL, WAKE, SIL, PRO, ON, SIL)

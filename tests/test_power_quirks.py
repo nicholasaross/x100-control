@@ -16,6 +16,7 @@ quirks mode, which does what the real projector did in traces over RS-232:
 
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -57,7 +58,7 @@ def driver(srv):
 def bridge(srv, expect=PowerState.OFF, **overrides):
     settings = dict(poll_interval=30, fast_poll_interval=0.1, heartbeat_interval=600, defer_timeout=10,
                     warmup_seconds=5, cooldown_seconds=0.6, settle_seconds=0.5, start_check_seconds=0.3,
-                    volume_step_delay=0, pending_check_interval=0.05)
+                    volume_step_delay=0, pending_check_interval=0.05, power_check_wait=0.15)
     settings.update(overrides)
     core = BridgeCore(Config(**settings), driver(srv), make_inputs(), publish=lambda doc: None)
     core.start()
@@ -66,7 +67,7 @@ def bridge(srv, expect=PowerState.OFF, **overrides):
 
 
 POWER_CUT = dict(outage_probe_seconds=0.3, power_up_quiet_seconds=1.5, poll_interval=0.2,  # scaled down
-                 power_check_seconds=0.2)
+                 power_check_seconds=0.2, power_check_wait=0.15)
 ON = [{"op": "power", "value": "ON"}]
 
 
@@ -784,6 +785,95 @@ def test_after_a_restart_on_is_doubted_even_when_it_is_on_but_off_still_works(x1
         off = core.submit_and_wait([{"op": "power", "value": "OFF"}])
         assert off["ok"] and not off["deferred"] and writes(x100, "W 11 01")
         assert wait_for(lambda: core.state.power == PowerState.OFF and not core._doubt_on, limit=3)
+    finally:
+        core.stop()
+
+
+def on_and_settled(core, x100):
+    """Switch it on and wait until the bridge is only checking power between full polls a long way off."""
+    assert core.submit_and_wait(ON)["ok"]
+    assert wait_for(lambda: core.state.power == PowerState.ON and mock_power(x100) == PowerState.ON, limit=4)
+    assert wait_for(lambda: core._next_full_poll - time.monotonic() > 20)
+
+
+def test_one_missed_reply_used_to_be_taken_for_a_power_cut(x100):
+    """From 21 October the projector missed a reply to the 2 s power check about once a day. The bridge took
+    each for a power cut: 5 minutes refusing commands, and three times, with it on, it then took it for
+    standby until the next command."""
+    core = bridge(x100, fast_poll_window=0, power_check_tries=1, **dict(POWER_CUT, poll_interval=30))
+    try:
+        on_and_settled(core, x100)
+        with x100.state.lock:
+            x100.state.drop_replies = 1
+        assert wait_for(core._quiet, limit=3)  # one missed reply: a "cut"
+        core._full_reading_due = False  # as it was: after the quiet, it went on believing standby
+        assert wait_for(lambda: not core._quiet(), limit=3)
+        time.sleep(0.5)
+        assert core.state.power == PowerState.OFF and mock_power(x100) == PowerState.ON  # wrong
+    finally:
+        core.stop()
+
+
+def test_one_missed_reply_is_not_a_power_cut(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core = bridge(x100, fast_poll_window=0, **dict(POWER_CUT, poll_interval=30))
+    try:
+        on_and_settled(core, x100)
+        with x100.state.lock:
+            x100.state.drop_replies = 1
+        assert wait_for(lambda: any("missed 1 reply to the power check, then answered" in r.getMessage()
+                                    for r in caplog.records), limit=3)
+        assert not core._quiet() and core._lost_since is None and core.state.power == PowerState.ON
+    finally:
+        core.stop()
+
+
+def test_after_the_quiet_it_finds_out_whether_it_really_went_to_standby(x100):
+    """Several missed replies in a row still look like a cut. Once the quiet is over, one full reading now
+    shows whether it really is in standby, rather than taking that for granted."""
+    core = bridge(x100, fast_poll_window=0, **dict(POWER_CUT, poll_interval=30))
+    try:
+        on_and_settled(core, x100)
+        with x100.state.lock:
+            x100.state.drop_replies = 3  # both tries, then the first probe
+        assert wait_for(core._quiet, limit=3)
+        assert core.state.power == PowerState.OFF  # for now, as after a real cut
+        assert wait_for(lambda: not core._quiet() and core.state.power == PowerState.ON, limit=4)
+    finally:
+        core.stop()
+
+
+def test_a_hang_says_how_long_it_was_in_standby_and_what_was_asked(x100, caplog):
+    """So that the log of a hang shows what came before it: how and when it went to standby, and how much the
+    bridge asked it meanwhile."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    x100.state.power = PowerState.ON
+    core = bridge(x100, expect=PowerState.ON, x100_quirks=True, **POWER_CUT)
+    try:
+        with x100.state.lock:
+            x100.state.turn_off()  # its remote
+        assert wait_for(lambda: core.state.power == PowerState.OFF, limit=3)
+        time.sleep(0.8)  # in standby: power checks only
+        with x100.state.lock:
+            x100.state.drop_power_on = 1  # it acknowledges "on" and stays in standby, as a hung one does
+        assert not core.submit_and_wait(ON)["ok"]
+        said = [r.getMessage() for r in caplog.records]
+        hang = next(m for m in said if m.startswith("the projector acknowledged power on but hasn't started"))
+        assert "It had been in standby for 0.0 h, since " in hang
+        assert "(its remote, or the projector itself, switched it off)" in hang
+        checks = re.search(r"made (\d+) power checks \(0 unanswered\), (\d+) full readings", hang)
+        assert checks and int(checks.group(1)) >= 2
+    finally:
+        core.stop()
+
+
+def test_once_a_day_it_says_what_it_asked(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core = bridge(x100, summary_seconds=0.6, **POWER_CUT)
+    try:
+        assert wait_for(lambda: any(r.getMessage().startswith("in the last ") for r in caplog.records), limit=3)
+        line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("in the last "))
+        assert re.search(r"\d+ power checks \(0 unanswered\), \d+ full readings, 0 commands, 0 outages", line)
     finally:
         core.stop()
 
