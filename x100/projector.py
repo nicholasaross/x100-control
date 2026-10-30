@@ -157,10 +157,10 @@ class Projector:
         """A read where silence is an answer: a short wait, no retry."""
         return self.read(cmd, timeout=self.probe_timeout, retry=False)
 
-    def power_probe(self) -> int:
-        """Just the power query, once, with a short wait. The X100-4K answers it even while its main
-        processor boots after a power cut, when any other question can hang it."""
-        return self.probe(p.POWER_STATUS)
+    def power_probe(self, timeout: Optional[float] = None) -> int:
+        """Just the power query, once, with a short wait unless told otherwise. The X100-4K answers it even
+        while its main processor boots after a power cut, when any other question can hang it."""
+        return self.read(p.POWER_STATUS, timeout=timeout or self.probe_timeout, retry=False)
 
     def answers_volume(self) -> bool:
         """Whether it answers about its volume at once. The X100-4K does in standby and stops the

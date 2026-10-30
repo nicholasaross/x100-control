@@ -33,7 +33,7 @@ import socket
 import threading
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Deque, Dict, List, Optional
 
@@ -110,6 +110,11 @@ class Config:
     # the same check runs between the usual polls. Any cut longer than this gets the quiet time above.
     # The price: in standby, it doesn't notice the remote starting it until a command comes. 0: off.
     power_check_seconds: float = 2.0
+    # It misses a reply to the power query now and then (about once a day at one check every 2 s, from
+    # 21 October), so a check waits power_check_wait for its answer, and silence counts as a cut only
+    # after power_check_tries tries in a row.
+    power_check_wait: float = 2.0
+    power_check_tries: int = 2
     # Otherwise the bridge learns all this from the first reading that shows it: standby, or a start.
     # After a power cut that can be a while, as its standby then sometimes answers like on.
     x100_quirks: bool = False       # this is an X100-4K: the rules above apply from the start
@@ -122,6 +127,7 @@ class Config:
     start_check_seconds: float = 2.0   # after "on", when to check it started (it stops answering volume)
     volume_step_delay: float = 0.05
     pending_check_interval: float = 1.0
+    summary_seconds: float = 86400.0          # how often to log what was asked and missed, and for how long
     scenes: Dict[str, int] = field(default_factory=dict)  # Alexa scene name -> remote key code
     shadow_topic_prefix: str = "$aws/things"  # only changed for tests against a local broker
     local_api_bind: str = "127.0.0.1:8661"    # "off" disables the local API
@@ -283,6 +289,16 @@ class BridgeCore:
         # bridge started (it can't know what happened before), until it's seen in standby or starting, a
         # reading that says "on" may be wrong. Holds what it's been doubted since, or "" once it can tell.
         self._doubt_on = ""
+        self._full_reading_due = False          # after the quiet that follows a cut: learn what it's doing
+        # For the log, so that a hang, and a week of watching, explain themselves: what was asked and
+        # missed since it last went to standby, and since the last daily summary, and time in each state.
+        self._off_at: Optional[float] = None    # when it last went to standby (wall clock), and how
+        self._off_how = ""
+        self._since_off: "Counter[str]" = Counter()
+        self._today: "Counter[str]" = Counter()
+        self._time_in: Dict[str, float] = {}
+        self._time_mark = time.monotonic()
+        self._next_summary = time.monotonic() + cfg.summary_seconds
         self._uptime = uptime
 
     # ------------------------------------------------------------------ intake
@@ -365,6 +381,8 @@ class BridgeCore:
             self._run_pending()
         if now >= self._next_poll:
             self.poll()
+        if now >= self._next_summary:
+            self._summarise()
         if self._full_publish.is_set() or now >= self._next_heartbeat:
             self._full_publish.clear()
             self._publish_state(force=True)
@@ -395,6 +413,7 @@ class BridgeCore:
             self._ack(cmd_id, BridgeError("INVALID_DIRECTIVE", "each op must be an object"))
             return
         log.info("command %s: %s", cmd_id, ops)
+        self._count("commands")
         error: Optional[BridgeError] = None
         deferred = False
         try:
@@ -425,6 +444,7 @@ class BridgeCore:
         return self._settle_power(self._read_power().state)
 
     def _read_power(self) -> PowerReading:
+        self._count("full readings")
         try:
             reading = self.proj.power_reading()
         except Unreachable:
@@ -511,7 +531,57 @@ class BridgeCore:
         old = self.state.power
         if power != old and old != PowerState.UNKNOWN:  # the first reading has its own line
             log.info("projector: %s -> %s (%s)", old.value, power.value, why)
+        if power != old:
+            self._tally_time()
+        standby = (PowerState.OFF, PowerState.COOLING)
+        if power in standby and old not in standby:
+            self._off_at, self._since_off = self.clock(), Counter()
+            if old == PowerState.UNKNOWN:
+                self._off_how = "it was already in standby when the bridge started"
+            elif why == "the bridge sent 'off'":
+                self._off_how = "the bridge switched it off"
+            elif why.startswith("answering again after a cut"):
+                self._off_how = "after a power cut, or a missed reply taken for one"
+            else:
+                self._off_how = "its remote, or the projector itself, switched it off"
         self.state.set_power(power)
+
+    def _count(self, what: str) -> None:
+        self._since_off[what] += 1
+        self._today[what] += 1
+
+    def _tally_time(self) -> None:
+        now = time.monotonic()
+        key = self.state.power.value
+        self._time_in[key] = self._time_in.get(key, 0.0) + now - self._time_mark
+        self._time_mark = now
+
+    @staticmethod
+    def _counts_text(counts: "Counter[str]") -> str:
+        checks, unanswered = counts["power checks"], counts["unanswered"]
+        text = f"{checks} power checks ({unanswered} unanswered), {counts['full readings']} full readings"
+        if counts["outage probes"]:
+            text += f", {counts['outage probes']} probes while it wasn't answering"
+        return text
+
+    def _since_off_text(self) -> str:
+        """For a hang: how long it had been in standby, how it got there, and what was asked meanwhile."""
+        if self._off_at is None or self.state.power not in (PowerState.WARMING, PowerState.OFF):
+            return ""
+        hours = (self.clock() - self._off_at) / 3600
+        when = time.strftime("%H:%M on %d %b", time.localtime(self._off_at))
+        return (f". It had been in standby for {hours:.1f} h, since {when} ({self._off_how}). Meanwhile the "
+                f"bridge made {self._counts_text(self._since_off)}")
+
+    def _summarise(self) -> None:
+        """Once a day: what was asked and missed, and how long it spent in each state."""
+        self._tally_time()
+        times = ", ".join(f"{state} {seconds / 3600:.1f} h" for state, seconds in sorted(self._time_in.items())
+                          if seconds >= 36)
+        log.info("in the last %.0f h: %s, %d commands, %d outages; %s", self.cfg.summary_seconds / 3600,
+                 self._counts_text(self._today), self._today["commands"], self._today["outages"], times or "-")
+        self._today, self._time_in = Counter(), {}
+        self._next_summary = time.monotonic() + self.cfg.summary_seconds
 
     def _settling(self) -> bool:
         """Only just on after starting up: the X100-4K's answers keep changing for a few seconds."""
@@ -532,7 +602,7 @@ class BridgeCore:
         if not self.proj.answers_volume():
             self._start_confirmed = True
             return
-        log.warning("the projector acknowledged power on but hasn't started")
+        log.warning("the projector acknowledged power on but hasn't started%s", self._since_off_text())
         raise BridgeError("NOT_IN_OPERATION", "the projector acknowledged 'on' but hasn't started. If it was "
                           "switched on at the wall in the last few minutes it may still start; if not, and its "
                           "remote can't start it either, switch it off at the wall for 30 seconds")
@@ -772,9 +842,11 @@ class BridgeCore:
             self._next_poll = self._quiet_until  # it has only just got power back: not a word
         elif self._link_down():
             self._probe_link()
-        elif self._checking_power() and (self._in_standby() or time.monotonic() < self._next_full_poll):
+        elif self._checking_power() and not self._full_reading_due and (
+                self._in_standby() or time.monotonic() < self._next_full_poll):
             self._check_power()
         else:
+            self._full_reading_due = False  # after a cut it may not be in standby: one missed reply looks the same
             self._refresh_quietly()
             if self._link_down():  # unanswered: check again shortly, asking only about power
                 self._next_poll = time.monotonic() + self.cfg.fast_poll_interval
@@ -802,16 +874,26 @@ class BridgeCore:
 
     def _check_power(self) -> None:
         """Just the power query, which the X100-4K answers even while it boots. If it goes unanswered, it
-        may have lost power, however briefly: from then on it's treated as after a power cut."""
-        now = time.monotonic()
-        try:
-            self.proj.power_probe()
-        except ProjectorError as exc:
-            log.warning("projector unreachable: %s", exc)
-            self._link_failed()
-            self._next_poll = now + self.cfg.fast_poll_interval  # ask again shortly, still only about power
-            return
-        self._next_poll = now + self.cfg.power_check_seconds
+        may have lost power, however briefly: from then on it's treated as after a power cut. It misses a
+        reply now and then, so that takes power_check_tries unanswered tries in a row."""
+        tries = max(1, self.cfg.power_check_tries)
+        for attempt in range(1, tries + 1):
+            self._count("power checks")
+            try:
+                self.proj.power_probe(timeout=self.cfg.power_check_wait)
+            except ProjectorError as exc:
+                self._count("unanswered")
+                if attempt < tries:
+                    continue
+                log.warning("projector unreachable: %s", exc)
+                self._link_failed()
+                self._next_poll = time.monotonic() + self.cfg.fast_poll_interval  # soon, still only about power
+                return
+            if attempt > 1:
+                log.info("the projector missed %d %s to the power check, then answered: not a power cut",
+                         attempt - 1, "reply" if attempt == 2 else "replies")
+            break
+        self._next_poll = time.monotonic() + self.cfg.power_check_seconds
         if not self._in_standby():
             self._next_poll = min(self._next_poll, self._next_full_poll)
 
@@ -851,8 +933,9 @@ class BridgeCore:
         """While it isn't answering, ask only the power query: the X100-4K answers that even while
         booting, when any other question can hang it."""
         now = time.monotonic()
+        self._count("outage probes")
         try:
-            self.proj.power_probe()
+            self.proj.power_probe(timeout=self.cfg.power_check_wait)
         except (Unreachable, ProjectorError):
             if not self._lost_said:
                 self._lost_said = True
@@ -871,6 +954,8 @@ class BridgeCore:
         self._start_confirmed = False
         self._doubt_on, self._confirmed_at = "a power cut", 0.0  # no reading from before the cut counts now
         self._set_power(PowerState.OFF, "answering again after a cut: it comes back in standby")
+        self._count("outages")
+        self._full_reading_due = True  # once the quiet is over: if it was only a missed reply, it's still on
         self._quiet_for(self.cfg.power_up_quiet_seconds)
 
     def _refresh_quietly(self) -> None:

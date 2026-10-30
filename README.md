@@ -39,6 +39,7 @@ What the chimes mean:
 | You hear | Meaning |
 |---|---|
 | two rising notes | done: the projector accepted it |
+| two level notes | accepted, but it waits until the projector is ready: an "off" in the 2 minutes after a start, say |
 | two falling notes | the bridge or the projector said no, or couldn't be reached (the log says which) |
 | one low note | heard "Hey Jarvis" but no command after it |
 
@@ -238,20 +239,23 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
   Asked anything else then (the bridge polling it, or `x100ctl trace`), it hung every time, whether it
   had been on or in standby before the cut. Hung, it sits in standby and won't start, not even from
   its own remote, until it has been switched off at the wall again. Left alone, it started fine. It
-  also hung after an "off" 66 s after "on", just after the picture appeared, and again after "off"s
-  6 and 17 minutes after a start. Until that's understood, **leave it on for at least 90 minutes
-  before switching it off**. So the bridge:
+  also hung after an "off" 66 s after "on", just after the picture appeared. And from 14 to 27
+  October it sometimes hung in standby, after an "off" from the bridge or from its remote, soon after
+  a start or hours later. Why isn't known yet: the bridge's log now records what came before each
+  hang. So the bridge:
   * asks only the power question once the projector stops answering, every 30 s, and when it answers
     again sends nothing at all for 5 minutes. Commands in that time get the two falling notes, and
-    the log says until when; the remote works once the projector has started up;
+    the log says until when; the remote works once the projector has started up. Then it reads it
+    once, to see whether it's on or in standby;
   * in standby, asks only the power question, every 2 s, and the rest only when a command comes. A
     power cut short enough to fall between two questions can't be seen, and booting looks just like
     starting up, so a routine question then would hang it. When the projector is on, the same check
-    runs between the usual questions. Any cut longer than about 2 s is seen and gets the 5 minutes'
-    quiet. The price: in standby, the bridge doesn't notice the remote starting the projector until
-    the next command, so an "off" after that waits 2 minutes, and "on" takes about a second longer
-    while the bridge checks first. A command within 5 minutes of a cut too short to see can still
-    hang it;
+    runs between the usual questions. A cut of more than a few seconds is seen and gets the 5
+    minutes' quiet. The projector misses a reply now and then, so only two unanswered checks in a
+    row count as a cut. The price: in standby, the bridge doesn't notice the remote starting the
+    projector until the next command, so an "off" after that waits 2 minutes, and "on" takes about a
+    second longer while the bridge checks first. A command within 5 minutes of a cut too short to see
+    can still hang it;
   * after a power cut, sometimes finds its standby answering just as if it were on, until it's next
     started. So after a cut, and after the bridge itself restarts, until it has seen the projector in
     standby or starting, "on" (or an input) gets the two falling notes, and the log says to start it

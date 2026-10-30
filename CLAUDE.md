@@ -77,29 +77,35 @@ the wall.
     starts it from there. Whether a serial "on" does is untested.
   - A cut short enough to fall between two polls looks like nothing happened: it answers again by the
     next poll, and booting looks just like starting up. In the simulator, that poll's question about
-    the input hangs it. It was first blamed for the 14 October hang, but an early "off" now looks
-    likelier (below).
+    the input hangs it. It was first blamed for the 14 October hang, but none has been seen since
+    (below).
 - **An "off" 66 s after "on", just as the picture appeared, also hung it.**
-- **So did "off"s 17 and 6 minutes after a start** (14 and 15 October). Each time it looked like
-  standby afterwards, and the next "on", 7 hours and 1 hour later, was acknowledged without starting.
-  - "Off"s after 84 minutes and after about 2 hours were fine.
-  - It's not yet known whether the "off" itself does it, or the bridge's questions while the main
-    processor shuts down after it (build 94bd0861 asked input, volume and mute about 27 times in the
-    first minute after an "off"; e776ca5b asks once). See the open items for the test that tells
-    them apart.
-  - Until then Nick leaves it on for at least 90 minutes before any "off". The 120 s
-    `X100_START_HOLD_SECONDS` below is far too short, but hasn't been changed yet.
+- **It also hangs in standby, whatever switched it off, and why isn't known yet.** The next "on" is
+  acknowledged without starting, and a wall power-cycle clears it.
+  - On 14 and 15 October that followed "off"s 17 and 6 minutes after a start, which looked like a
+    pattern.
+  - But from 18 to 27 October, with clean power and every change logged, it hung in 4 of 9 standby
+    periods. The "off"s before them were from the bridge after 91 minutes on, and from the remote
+    (or the projector itself) after 2 hours on. Other standby periods, after similar "off"s, were fine.
+  - So it's either the projector by itself, or something the bridge does in standby: build
+    e776ca5b and later ask "power?" every 2 s, about 43,000 times a day. The open items have the
+    week of watching that tells them apart.
+- **It misses a reply to the power query now and then:** about once a day at one check every 2 s,
+  from 21 October. On 24 October it stayed on throughout one, so it wasn't a power cut.
 - So the bridge:
   - **After any failed reading:** asks only the power query, 2 s after the first failure and then
     every 30 s (`X100_OUTAGE_PROBE_SECONDS`).
   - **Once the projector answers again:** sends nothing at all for 300 s
     (`X100_POWER_UP_QUIET_SECONDS`), and refuses commands meanwhile with a message saying until
-    when.
+    when. Then it takes one full reading, rather than assuming standby: missed replies can look like
+    a cut while it stays on.
   - **When the Pi has been up for less than 300 s:** starts the same way, since the Pi and the
     projector may have shared the power cut.
   - **In standby:** asks only the power query, every 2 s (`X100_POWER_CHECK_SECONDS`), and asks the
-    rest only when a command comes. When it's on, the same check runs between the 30 s polls. Any
-    cut longer than about 2 s is then seen, and gets the 300 s quiet.
+    rest only when a command comes. When it's on, the same check runs between the 30 s polls. Each
+    check waits 2 s for its answer (`power_check_wait`), and silence counts as a cut only after two
+    unanswered tries in a row (`power_check_tries`), so one missed reply isn't taken for one. A cut of
+    more than a few seconds is seen, and gets the 300 s quiet.
     - The price: a remote start from standby goes unseen until the next command, so an "off" then
       waits the full 120 s, and "on" takes about a second longer, as the bridge reads first.
     - Still at risk: a command within 300 s of a cut too short to see.
@@ -121,6 +127,11 @@ the wall.
   - **Logs every change in the power state it acts on,** as `projector: OFF -> WARMING (why)`. The
     reason is a command it sent, a reading with what the projector answered, or a cut. The first
     reading after starting has its own line instead ("projector reachable").
+  - **Says what came before a hang.** "Acknowledged power on but hasn't started" now adds how long it
+    had been in standby, how it got there (the bridge, its remote or itself, or a cut), and how many
+    power checks, unanswered ones and full readings the bridge made meanwhile.
+  - **Once a day (`summary_seconds`), logs what it asked and missed:** `in the last 24 h: … power
+    checks (… unanswered), … full readings, … commands, … outages; OFF … h, ON … h`.
   - **For 120 s after a start (`X100_START_HOLD_SECONDS`):** sends no power command. An "off"
     waits, and a repeated "on" isn't sent.
   - **Never resends "on" by itself.** 2 s after "on" it checks whether volume still answers. If it
@@ -139,6 +150,9 @@ the wall.
 
 ## Listener notes
 
+- **Chimes:** two rising notes for ok, two level notes for queued (accepted, but waiting until the
+  projector is ready, such as an "off" in the 2 minutes after a start), two falling notes for fail,
+  and one low note when no command followed "Hey Jarvis".
 - **On the Pi 3**, the wake word takes about 26 ms per 80 ms frame and the command spotter about
   24 ms.
 - **Keep ONNX intra-op spinning off** (`allow_spinning=0` in `wake.py`). With it on, the listener
@@ -161,7 +175,7 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - **The `test` extra needs Python 3.10 or later,** because amqtt does. A Mac's built-in `python3`
   may be 3.9.
 - **To test on 3.9,** install the package with `pytest` instead of the extra. The MQTT and listener
-  tests then skip: 173 passed and 14 skipped last time.
+  tests then skip: 178 passed and 14 skipped last time.
 - **Other skips need setting up first.** The Alexa schema tests and the real-speech tests skip until
   that's done, as tests/README.md describes.
 
@@ -211,21 +225,21 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - The old private repo, `nicholasaross/x100-control-private`, is archived. Don't push to it. The
   merge messages for "pull request #1" and "#2" in `main`'s early history refer to PRs there.
 
-## Open items (as of 2026-10-18)
+## Open items (as of 2026-10-30)
 
-- **Early "off"s hang it** (see the quirks above). This explains the 14 and 15 October hangs better
-  than a mains blip. What to find out first:
-  1. Whether it's the "off" itself or the questions after it. With the bridge stopped, start it
-     with the remote. 6 minutes later, run `x100ctl trace off --power-only --seconds 300 --interval
-     2`. Then press the remote's power button once. If it starts, the "off" alone didn't hang it.
-  2. Then the safe time after a start, or a fix that makes voice "off" safe at any time: for
-     example, asking only the power query for some minutes after any "off".
-  - Any change to the start hold or to what's asked after an "off" needs Nick's agreement and a
-    hazard-then-prevented test.
-- **A crash between 16 and 18 October** happened under e776ca5b, before the journal was persistent.
-  Nick doesn't remember the details, so it can't be placed.
-- **build-e776ca5b isn't tagged yet.** It's installed (15 October, with `X100_QUIRKS=true`), but no
-  voice "on" has been seen to work on it since. Tag it, or its successor, once one has.
+- **A week of watching, from when the Pi is next switched on.** The build installed on 30 October
+  runs with `X100_POWER_CHECK_SECONDS=3600` in bridge.env, so in standby the bridge asks "power?"
+  about once an hour instead of every 2 s. Nick powered the Pi down straight after installing it,
+  so the week starts when it's back on.
+  - Compare with 18 to 27 October, at one check every 2 s, when it hung in 4 of 9 standby periods.
+  - Each hang's log line now says how long it had been in standby, how it got there and what was
+    asked meanwhile. The daily summary line gives the totals.
+  - If it still hangs as often, the projector does it by itself: look next at its firmware and its
+    standby settings. If it stops, the 2 s checks are implicated.
+  - Meanwhile, a cut of a few seconds between hourly checks goes unseen, so a command within 5
+    minutes of one could hang it: the hazard the 2 s checks were for.
+- **A crash between 16 and 18 October** happened before the journal was persistent. Nick doesn't
+  remember the details, so it can't be placed.
 - **Untested: a serial "on" from the standby that looks on** after a power cut. Until it's known to
   be safe, the bridge refuses "on" there and asks for the remote. To test it, stop the bridge, cut
   the power at the wall for 10 s, and after 8 minutes, if `x100ctl trace` shows "on" with the
