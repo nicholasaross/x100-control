@@ -58,7 +58,8 @@ def driver(srv):
 def bridge(srv, expect=PowerState.OFF, **overrides):
     settings = dict(poll_interval=30, fast_poll_interval=0.1, heartbeat_interval=600, defer_timeout=10,
                     warmup_seconds=5, cooldown_seconds=0.6, settle_seconds=0.5, start_check_seconds=0.3,
-                    volume_step_delay=0, pending_check_interval=0.05, power_check_wait=0.15)
+                    volume_step_delay=0, pending_check_interval=0.05, power_check_wait=0.15,
+                    standby_confirm_seconds=0.3, confirm_input_wait=0.3)
     settings.update(overrides)
     core = BridgeCore(Config(**settings), driver(srv), make_inputs(), publish=lambda doc: None)
     core.start()
@@ -156,7 +157,9 @@ def test_start_up_hiccups_dont_count_as_standby():
     assert core._settle_power(PowerState.OFF) == PowerState.WARMING  # looks like standby mid start-up
     assert core._settle_power(PowerState.ON) == PowerState.ON
     assert core._settle_power(PowerState.OFF) == PowerState.ON  # a gap after it first answered
-    core._sent_on = time.monotonic() - 61  # past the start-up window: believe it again
+    core._sent_on = time.monotonic() - 61  # past the start-up window: believe it again...
+    assert core._settle_power(PowerState.ON) == PowerState.ON
+    assert core._settle_power(PowerState.OFF) == PowerState.ON  # ...once a second reading agrees
     assert core._settle_power(PowerState.OFF) == PowerState.OFF
     assert fake.ons == 0
 
@@ -874,6 +877,70 @@ def test_once_a_day_it_says_what_it_asked(x100, caplog):
         assert wait_for(lambda: any(r.getMessage().startswith("in the last ") for r in caplog.records), limit=3)
         line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("in the last "))
         assert re.search(r"\d+ power checks \(0 unanswered\), \d+ full readings, 0 commands, 0 outages", line)
+    finally:
+        core.stop()
+
+
+def started_and_settled(core, x100):
+    assert core.submit_and_wait(ON)["ok"]
+    assert wait_for(lambda: core.state.power == PowerState.ON and mock_power(x100) == PowerState.ON, limit=4)
+    time.sleep(0.7)  # past settle_seconds and the start hold
+
+
+def test_one_slow_answer_about_its_input_used_to_stick_as_standby(x100):
+    """On 2 November, 31 s after its picture appeared, it didn't answer about its input in time (busy, perhaps
+    with its menu open) and the bridge took it for standby. As standby means power checks only, that stuck."""
+    core = bridge(x100, fast_poll_window=0, start_hold_seconds=0.5, poll_interval=0.3, power_check_seconds=30,
+                  standby_confirm_seconds=0)  # as it was: believed at once
+    try:
+        started_and_settled(core, x100)
+        with x100.state.lock:
+            x100.state.drop_input_replies = 1
+        assert wait_for(lambda: core.state.power == PowerState.OFF, limit=3)
+        time.sleep(1.0)
+        assert core.state.power == PowerState.OFF and mock_power(x100) == PowerState.ON  # wrong, and it stuck
+    finally:
+        core.stop()
+
+
+def test_a_standby_reading_straight_after_on_is_checked_again(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core = bridge(x100, fast_poll_window=0, start_hold_seconds=0.5, poll_interval=0.3, power_check_seconds=30,
+                  standby_confirm_seconds=0.6)
+    try:
+        started_and_settled(core, x100)
+        with x100.state.lock:
+            x100.state.drop_input_replies = 1
+        said = lambda: [r.getMessage() for r in caplog.records]  # noqa: E731
+        assert wait_for(lambda: any("looks like standby, but it was on" in m for m in said()), limit=3)
+        assert wait_for(lambda: any("answered about its input this time" in m for m in said()), limit=3)
+        assert core.state.power == PowerState.ON and not any("ON -> OFF" in m for m in power_changes(caplog))
+        with x100.state.lock:
+            x100.state.turn_off()  # its remote: a real standby is still believed, once a second reading agrees
+        assert wait_for(lambda: core.state.power == PowerState.OFF, limit=4)
+        assert "R 13 01 (busy)" in x100.state.log
+    finally:
+        core.stop()
+
+
+def test_a_command_meanwhile_counts_as_the_second_reading(x100, caplog):
+    """Switched off by its remote, then "on" by voice before the bridge has looked again: the command's own
+    reading confirms the standby, and the "on" goes out."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core = bridge(x100, fast_poll_window=0, start_hold_seconds=0.5, poll_interval=0.3, power_check_seconds=30,
+                  standby_confirm_seconds=10)
+    try:
+        started_and_settled(core, x100)
+        with x100.state.lock:
+            x100.state.turn_off()  # its remote
+        assert wait_for(lambda: any("looks like standby, but it was on" in r.getMessage() for r in caplog.records),
+                        limit=3)
+        assert wait_for(lambda: mock_power(x100) == PowerState.OFF, limit=2)  # past its cool-down
+        assert core.state.power == PowerState.ON  # not believed yet
+        before = len(writes(x100, "W 11 00"))
+        assert core.submit_and_wait(ON)["ok"]
+        assert len(writes(x100, "W 11 00")) == before + 1  # believed now, and sent
+        assert wait_for(lambda: x100.state.power == PowerState.ON, limit=4)
     finally:
         core.stop()
 

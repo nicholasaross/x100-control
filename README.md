@@ -252,10 +252,11 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
     starting up, so a routine question then would hang it. When the projector is on, the same check
     runs between the usual questions. A cut of more than a few seconds is seen and gets the 5
     minutes' quiet. The projector misses a reply now and then, so only two unanswered checks in a
-    row count as a cut. The price: in standby, the bridge doesn't notice the remote starting the
-    projector until the next command, so an "off" after that waits 2 minutes, and "on" takes about a
-    second longer while the bridge checks first. A command within 5 minutes of a cut too short to see
-    can still hang it;
+    row count as a cut. And a standby reading straight after it was on is checked again before the
+    bridge believes it, as one slow answer while on can look like standby. The price: in standby, the
+    bridge doesn't notice the remote starting the projector until the next command, so an "off" after
+    that waits 2 minutes, and "on" takes about a second longer while the bridge checks first. A
+    command within 5 minutes of a cut too short to see can still hang it;
   * after a power cut, sometimes finds its standby answering just as if it were on, until it's next
     started. So after a cut, and after the bridge itself restarts, until it has seen the projector in
     standby or starting, "on" (or an input) gets the two falling notes, and the log says to start it

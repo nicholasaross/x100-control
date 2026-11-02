@@ -115,6 +115,12 @@ class Config:
     # after power_check_tries tries in a row.
     power_check_wait: float = 2.0
     power_check_tries: int = 2
+    # Once, 31 s after its picture appeared, it didn't answer about its input in time while on (busy, perhaps
+    # with its menu open), and so looked like standby. As standby means power checks only, that stuck. So a
+    # standby reading straight after it was on is believed only once a second reading, standby_confirm_seconds
+    # later and waiting confirm_input_wait for the answer about its input, agrees. 0: believe it at once.
+    standby_confirm_seconds: float = 15.0
+    confirm_input_wait: float = 2.0
     # Otherwise the bridge learns all this from the first reading that shows it: standby, or a start.
     # After a power cut that can be a while, as its standby then sometimes answers like on.
     x100_quirks: bool = False       # this is an X100-4K: the rules above apply from the start
@@ -290,6 +296,7 @@ class BridgeCore:
         # reading that says "on" may be wrong. Holds what it's been doubted since, or "" once it can tell.
         self._doubt_on = ""
         self._full_reading_due = False          # after the quiet that follows a cut: learn what it's doing
+        self._confirm_standby_at: Optional[float] = None  # a standby reading after on, to be checked again
         # For the log, so that a hang, and a week of watching, explain themselves: what was asked and
         # missed since it last went to standby, and since the last daily summary, and time in each state.
         self._off_at: Optional[float] = None    # when it last went to standby (wall clock), and how
@@ -446,7 +453,10 @@ class BridgeCore:
     def _read_power(self) -> PowerReading:
         self._count("full readings")
         try:
-            reading = self.proj.power_reading()
+            if self._confirm_standby_at is None:
+                reading = self.proj.power_reading()
+            else:  # checking a standby reading again: give it time to answer about its input
+                reading = self.proj.power_reading(input_wait=self.cfg.confirm_input_wait)
         except Unreachable:
             self._link_failed()
             raise
@@ -505,6 +515,17 @@ class BridgeCore:
                 else:
                     power = PowerState.WARMING  # never resent: a second "on" while it starts can hang it
         prev = self.state.power
+        if (self._power_query_lies and self.cfg.standby_confirm_seconds > 0 and prev == PowerState.ON
+                and self._sent_off is None):  # after the bridge's own "off", standby is what it expects
+            if power == PowerState.OFF and self._confirm_standby_at is None:
+                self._confirm_standby_at = now + self.cfg.standby_confirm_seconds
+                log.info("the projector looks like standby, but it was on: checking again in %.0f s before "
+                         "believing it", self.cfg.standby_confirm_seconds)
+                self._seen, self._confirmed_at = seen, now
+                return PowerState.ON  # for now
+            if power != PowerState.OFF and self._confirm_standby_at is not None:
+                log.info("the projector answered about its input this time: it's still on")
+        self._confirm_standby_at = None  # a second reading agreed, or it isn't standby after all
         if power == PowerState.OFF:
             if not self._start_held():
                 self._started_at = None
@@ -860,6 +881,8 @@ class BridgeCore:
         busy = self.pending or self.state.power in (PowerState.WARMING, PowerState.COOLING)
         fast = busy or now < self._fast_until
         self._next_full_poll = now + (self.cfg.fast_poll_interval if fast else self.cfg.poll_interval)
+        if self._confirm_standby_at is not None:  # a standby reading to check again
+            self._next_full_poll = min(self._next_full_poll, self._confirm_standby_at)
         self._next_poll = self._next_full_poll
         if self._checking_power():
             self._next_poll = min(self._next_poll, now + self.cfg.power_check_seconds)
