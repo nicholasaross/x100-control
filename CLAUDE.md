@@ -294,6 +294,11 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - **The bridge could use the plug, but doesn't yet.** It could read the power to tell on from
   standby without asking the projector anything, spot a power cut of any length from the plug's
   uptime, and power-cycle a hang. Any of that needs Nick's agreement and tests.
+  - The cut detection matters more with hourly checks. A cut, or a restart of the plug, between
+    checks goes unseen, so the bridge doesn't doubt "on" afterwards. If the projector then sits in
+    the standby that looks on, a voice "on" gets "ok" and nothing is sent. This happened on 2
+    November: the plug restarted for a settings change, and the fan then ran in standby, at about
+    13 W against 12.
 - **A crash between 16 and 18 October** happened before the journal was persistent. Nick doesn't
   remember the details, so it can't be placed.
 - **Untested: a serial "on" from the standby that looks on** after a power cut. Until it's known to
