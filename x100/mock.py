@@ -89,6 +89,9 @@ class MockState:
     cold_standby_after_power_up: bool = False
     cold: bool = False               # in that standby now
     drop_replies: int = 0            # say nothing to this many requests (a missed reply)
+    # Once, while on, it didn't answer about its input in time (busy, perhaps with its menu open) but still
+    # answered about volume and mute: a moment that looks just like standby.
+    drop_input_replies: int = 0
     sources: Dict[int, str] = field(default_factory=lambda: dict(MOCK_SOURCES))
     keys: List[int] = field(default_factory=list)
     log: List[str] = field(default_factory=list)
@@ -205,6 +208,11 @@ def handle_frame(state: MockState, data: bytes) -> bytes:
             return SILENCE
         state.tick()
         on = state.power == PowerState.ON
+        if (state.drop_input_replies > 0 and frame.type == TYPE_READ and len(frame.payload) == 5
+                and (frame.payload[3], frame.payload[4]) == (0x13, 0x01)):
+            state.drop_input_replies -= 1
+            state.log.append("R 13 01 (busy)")
+            return SILENCE
         if state.quirks and len(frame.payload) in (4, 5) and frame.payload[0] == 0x34:
             write = frame.type == TYPE_WRITE
             c1, c2 = (frame.payload[1], frame.payload[2]) if write else (frame.payload[3], frame.payload[4])

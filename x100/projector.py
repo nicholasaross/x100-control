@@ -125,20 +125,22 @@ class Projector:
             return PowerState.UNKNOWN
         return state
 
-    def power_reading(self) -> PowerReading:
+    def power_reading(self, input_wait: Optional[float] = None) -> PowerReading:
         """The power state, allowing for projectors whose power query always says "on".
 
         The X100-4K answers "on" in standby and while it starts up, as well as when it's on.
         Which other questions it answers tells the three apart. When it's on, it answers about
         its input. In standby it doesn't, but it still answers volume and mute. While it starts
         up (about a minute), it answers only the power query. Projectors that report standby,
-        warming up and cooling down themselves cost just the one query.
+        warming up and cooling down themselves cost just the one query. ``input_wait``: how long to
+        wait for the answer about its input, when a slow one is likely (it may be busy).
         """
         reported = self.power()
         if reported != PowerState.ON:
             return PowerReading(reported, reported)
         try:
-            return PowerReading(PowerState.ON, reported, source=self.probe(p.SOURCE_STATUS))
+            source = self.read(p.SOURCE_STATUS, timeout=input_wait or self.probe_timeout, retry=False)
+            return PowerReading(PowerState.ON, reported, source=source)
         except FunctionDisabled:
             return PowerReading(PowerState.ON, reported)  # it answered: running, just without an input
         except Unreachable:

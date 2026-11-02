@@ -92,6 +92,9 @@ the wall.
     week of watching that tells them apart.
 - **It misses a reply to the power query now and then:** about once a day at one check every 2 s,
   from 21 October. On 24 October it stayed on throughout one, so it wasn't a power cut.
+- **While on, it can be slow to answer about its input:** on 2 November, 31 s after its picture
+  appeared, it didn't answer within 0.6 s but did answer about volume and mute. That looks just like
+  standby. Perhaps its menu was open, or an input was being unplugged.
 - So the bridge:
   - **After any failed reading:** asks only the power query, 2 s after the first failure and then
     every 30 s (`X100_OUTAGE_PROBE_SECONDS`).
@@ -127,6 +130,10 @@ the wall.
   - **Logs every change in the power state it acts on,** as `projector: OFF -> WARMING (why)`. The
     reason is a command it sent, a reading with what the projector answered, or a cut. The first
     reading after starting has its own line instead ("projector reachable").
+  - **Checks a standby reading again when it was on,** unless the bridge has just switched it off.
+    It believes the reading only once a second reading agrees: 15 s later (`standby_confirm_seconds`),
+    waiting 2 s for the answer about its input (`confirm_input_wait`). A command in between counts as
+    that second reading. Otherwise one slow answer would stick, as standby means power checks only.
   - **Says what came before a hang.** "Acknowledged power on but hasn't started" now adds how long it
     had been in standby, how it got there (the bridge, its remote or itself, or a cut), and how many
     power checks, unanswered ones and full readings the bridge made meanwhile.
@@ -175,7 +182,7 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - **The `test` extra needs Python 3.10 or later,** because amqtt does. A Mac's built-in `python3`
   may be 3.9.
 - **To test on 3.9,** install the package with `pytest` instead of the extra. The MQTT and listener
-  tests then skip: 178 passed and 14 skipped last time.
+  tests then skip: 181 passed and 14 skipped last time.
 - **Other skips need setting up first.** The Alexa schema tests and the real-speech tests skip until
   that's done, as tests/README.md describes.
 
