@@ -25,6 +25,26 @@ changing anything.
     which is how the logs of a crash between 16 and 18 October were lost.
   - The Pi has had its official power supply since 18 October. Before that it logged undervoltage
     many times an hour.
+  - The Pi has no clock battery. After a boot its log carries the time it shut down until the
+    network corrects the clock, so the first lines of a boot can be days out.
+- **The projector's mains goes through a Shelly Plus Plug UK** (Gen2, stable firmware 2.0.3), since
+  31 October. The bridge doesn't use it yet.
+  - It's set to switch its output on at start-up (`initial_state`), and on again 2 minutes after
+    any off (`auto_on`). Its cloud link and its own setup network are off, and an admin password
+    is set.
+  - It restores the projector's power after a power cut and after an ordinary restart, as tested
+    on 2 November. But after its own firmware updates the output stayed off, so don't update it
+    without a reason, and check the output after one.
+  - Any off or restart of the plug is a power cut for the projector: leave it alone for 5 minutes
+    afterwards.
+  - It publishes its status over MQTT to Mosquitto on the Pi, under `x100-plug/`. Its MQTT control
+    is off. On the network, Mosquitto takes only the plug, signed in. On the Pi itself, anyone can
+    read, and nobody can write. So reading the plug needs no password:
+    `mosquitto_sub -h 127.0.0.1 -p 1884 -t x100-plug/status/switch:0 -C 1 -W 90` on the Pi. It
+    sends about once a minute, and on any change: `output`, `apower` (watts), `source` and more.
+- **On its HDMI:** one Roku stick, powered from the projector's USB port, with "1-touch play" (CEC)
+  off. A Fire TV stick was removed on 2 November. The projector's "Auto Power On (CEC)" is off.
+  The household switches the projector with its own remote.
 - Only one program can have the serial port at a time. To use `x100ctl` on the Pi, first run
   `sudo systemctl stop x100-bridge`, then from `/opt/x100-control`:
   `sudo -u x100 .venv/bin/x100ctl --env-file bridge.env <command>`.
@@ -92,6 +112,9 @@ the wall.
     week of watching that tells them apart.
 - **It misses a reply to the power query now and then:** about once a day at one check every 2 s,
   from 21 October. On 24 October it stayed on throughout one, so it wasn't a power cut.
+- **It draws about 150 W when on, and about 12 W in standby,** whichever kind of standby (measured
+  through the plug on 2 November). Its digital audio port glows red in standby. So the plug's
+  reading tells on from standby, but not one standby from another.
 - **While on, it can be slow to answer about its input:** on 2 November, 31 s after its picture
   appeared, it didn't answer within 0.6 s but did answer about volume and mute. That looks just like
   standby. Perhaps its menu was open, or an input was being unplugged.
@@ -104,11 +127,12 @@ the wall.
     a cut while it stays on.
   - **When the Pi has been up for less than 300 s:** starts the same way, since the Pi and the
     projector may have shared the power cut.
-  - **In standby:** asks only the power query, every 2 s (`X100_POWER_CHECK_SECONDS`), and asks the
-    rest only when a command comes. When it's on, the same check runs between the 30 s polls. Each
-    check waits 2 s for its answer (`power_check_wait`), and silence counts as a cut only after two
-    unanswered tries in a row (`power_check_tries`), so one missed reply isn't taken for one. A cut of
-    more than a few seconds is seen, and gets the 300 s quiet.
+  - **In standby:** asks only the power query, every 2 s (`X100_POWER_CHECK_SECONDS`; Nick's
+    bridge.env sets 3600 for the week of watching), and asks the rest only when a command comes.
+    When it's on, the same check runs between the 30 s polls. Each check waits 2 s for its answer
+    (`power_check_wait`), and silence counts as a cut only after two unanswered tries in a row
+    (`power_check_tries`), so one missed reply isn't taken for one. A cut of more than a few
+    seconds is seen, and gets the 300 s quiet.
     - The price: a remote start from standby goes unseen until the next command, so an "off" then
       waits the full 120 s, and "on" takes about a second longer, as the bridge reads first.
     - Still at risk: a command within 300 s of a cut too short to see.
@@ -201,14 +225,21 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 
       scp ../x100-control.zip x100-controller@x100-pi.local:
       ssh x100-controller@x100-pi.local
-      rm -rf x100-control && unzip -q x100-control.zip && cd x100-control && sudo deploy/install.sh
+      sudo rm -rf x100-control && unzip -q x100-control.zip && cd x100-control && sudo deploy/install.sh
+
+  - It's `sudo rm`, because install.sh leaves a root-owned cache file in the unpacked folder (see
+    the open items).
 
   - `install.sh` keeps bridge.env, listener.env, config/, models and clips.
   - It ends by printing the installed build ID. Check that it matches the one make_release printed.
   - Older zips from before the move may still be in Nick's home folder. Never send those.
-- **Install over SSH:** if Nick has put his SSH key on the Pi, these steps can run as
-  `ssh x100-controller@x100-pi.local '...'`. That works only if `sudo -n true` succeeds there.
-  Otherwise, ask him to run `install.sh` himself.
+- **Install over SSH:** Nick's SSH key is on the Pi, so `scp` and read-only `ssh` commands work from
+  his Mac. sudo there needs his password (`sudo -n true` fails). So run the install in a tab of his
+  Terminal panel, as `ssh -t x100-controller@x100-pi.local 'sudo rm -rf x100-control && unzip -q
+  x100-control.zip && cd x100-control && sudo deploy/install.sh'`, and he types the password there.
+  It ends with `Installed: … (build <id>, …)` and `Connection to x100-pi.local closed.`
+- **Tags so far:** `build-94bd0861`, `build-e776ca5b`, `build-df034892`, `build-91c5549f` and
+  `build-bbc37ab4`, the build installed since 2 November.
 
 ## Working with Nick
 
@@ -218,6 +249,9 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
   at each step.
 - Ask him before anything that sends commands to the projector, restarts the services or installs
   a build. Reading logs and `--version` is fine.
+- Never handle his passwords: not sudo's, and not the plug's admin password. When one is needed,
+  run the command in a tab of his Terminal panel so he types it there, then read the result from
+  the tab. Don't store a password anywhere to use later.
 - Docs and messages use British spelling and plain, short sentences.
 - Work on a branch and open a pull request. `main` is what gets released.
 
@@ -232,19 +266,34 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - The old private repo, `nicholasaross/x100-control-private`, is archived. Don't push to it. The
   merge messages for "pull request #1" and "#2" in `main`'s early history refer to PRs there.
 
-## Open items (as of 2026-10-30)
+## Open items (as of 2026-11-02)
 
-- **A week of watching, from when the Pi is next switched on.** The build installed on 30 October
-  runs with `X100_POWER_CHECK_SECONDS=3600` in bridge.env, so in standby the bridge asks "power?"
-  about once an hour instead of every 2 s. Nick powered the Pi down straight after installing it,
-  so the week starts when it's back on.
-  - Compare with 18 to 27 October, at one check every 2 s, when it hung in 4 of 9 standby periods.
-  - Each hang's log line now says how long it had been in standby, how it got there and what was
-    asked meanwhile. The daily summary line gives the totals.
-  - If it still hangs as often, the projector does it by itself: look next at its firmware and its
-    standby settings. If it stops, the 2 s checks are implicated.
+- **A week of watching, from 17:06 on 2 November to about 9 November.** In effect throughout:
+  - build bbc37ab4, installed at 17:48
+  - `X100_POWER_CHECK_SECONDS=3600` in bridge.env, so in standby the bridge asks "power?" about
+    once an hour, not every 2 s
+  - the Fire TV stick removed, and the Roku's "1-touch play" off, which cuts CEC traffic
+
+  To compare: from 18 to 27 October, at one check every 2 s, it hung in 4 of 9 standby periods.
+  - Count the "acknowledged power on but hasn't started" lines in `journalctl -u x100-bridge`.
+    Each says how long it had been in standby, how it got there and what was asked meanwhile.
+  - Count the standby periods: the `projector: … -> OFF` or `-> COOLING` lines. A remote start
+    from standby isn't seen, so also count the "on" commands that worked.
+  - The daily `in the last 24 h:` lines give the totals.
+  - If it hangs, read the plug before anyone power-cycles it (MQTT, above). Anything but about
+    12 W in standby is a clue.
+  - If the hangs stop, undo one change at a time to find which mattered. Put the 2 s checks back
+    first, keeping the CEC changes.
+  - If they carry on, the projector does it by itself: look next at its firmware and its standby
+    settings. RS-232 control has to stay on.
   - Meanwhile, a cut of a few seconds between hourly checks goes unseen, so a command within 5
     minutes of one could hang it: the hazard the 2 s checks were for.
+- **install.sh leaves a root-owned cache file in the unpacked release folder.** Its package check
+  runs Python as root from that folder, which also means the check imports the unpacked copy, not
+  the installed one. Until that's fixed, the install step uses `sudo rm`.
+- **The bridge could use the plug, but doesn't yet.** It could read the power to tell on from
+  standby without asking the projector anything, spot a power cut of any length from the plug's
+  uptime, and power-cycle a hang. Any of that needs Nick's agreement and tests.
 - **A crash between 16 and 18 October** happened before the journal was persistent. Nick doesn't
   remember the details, so it can't be placed.
 - **Untested: a serial "on" from the standby that looks on** after a power cut. Until it's known to
