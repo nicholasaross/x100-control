@@ -9,7 +9,8 @@ description = "Local voice control for the ViewSonic X100-4K projector: a wake-w
 readme = "README.md"
 # Python 3.11 only, as on the Pi: the listener's tflite-runtime has no Pi builds for anything newer.
 requires-python = "==3.11.*"
-dependencies = ["pyserial>=3.5"]
+# paho-mqtt reads the optional smart plug on the projector's mains (x100_bridge/plug.py).
+dependencies = ["pyserial>=3.5", "paho-mqtt>=2.0"]
 
 [project.optional-dependencies]
 # The voice listener (the Raspberry Pi). On Linux openWakeWord pulls in

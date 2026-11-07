@@ -35,6 +35,7 @@ from x100.projector import projector_from_env
 
 from .core import BridgeCore, Config, system_uptime
 from .local_api import ApiConfigError, LocalApi, check_settings
+from .plug import PlugWatcher
 
 log = logging.getLogger("x100.bridge")
 
@@ -133,7 +134,23 @@ def _get_json(url: str, token: str = "", timeout: float = 3.0) -> Dict[str, Any]
         return json.loads(resp.read())
 
 
-def run_check(cfg: Config, core: BridgeCore, api: Optional[LocalApi], link: Optional[MqttLink]) -> int:
+def make_plug_watcher(cfg: Config, core: BridgeCore) -> Optional[PlugWatcher]:
+    """The plug on the projector's mains, if X100_PLUG_MQTT names its broker. A problem with its settings
+    is logged, and the bridge carries on without it: it's an extra, so it mustn't stop the bridge."""
+    if not cfg.plug_enabled:
+        return None
+    try:
+        return PlugWatcher(cfg.plug_mqtt, cfg.plug_prefix, on_status=core.plug_status,
+                           on_reconnected=core.plug_reconnected)
+    except ImportError:
+        log.error("X100_PLUG_MQTT is set, but paho-mqtt isn't installed: carrying on without the plug")
+    except ValueError as exc:
+        log.error("%s: carrying on without the plug", exc)
+    return None
+
+
+def run_check(cfg: Config, core: BridgeCore, api: Optional[LocalApi], link: Optional[MqttLink],
+              plug: Optional[PlugWatcher] = None) -> int:
     ok = True
     print(version_line())
     print(f"Projector link: {core.proj.transport.describe()} ({'one-way' if cfg.one_way else 'two-way'})")
@@ -167,6 +184,21 @@ def run_check(cfg: Config, core: BridgeCore, api: Optional[LocalApi], link: Opti
             api.stop()
     else:
         print("Local API: off (LOCAL_API_BIND=off)")
+
+    if plug is not None:
+        print(f"The projector's plug: {plug.describe()}")
+        plug.start()
+        if plug.connected.wait(timeout=5):
+            time.sleep(1.0)  # for the broker's note of whether the plug is connected
+            state = {True: "the plug is connected", False: "but the plug isn't connected to it"}
+            print(f"  reading it, {state.get(plug.plug_online, 'and the plug has said nothing yet')}")
+        else:
+            ok = False
+            print("  can't reach the broker -- check X100_PLUG_MQTT")
+        plug.stop()
+    elif cfg.plug_enabled:
+        ok = False
+        print("The projector's plug: not read (see the error above)")
 
     if link is not None:
         print(f"AWS IoT: {cfg.iot_endpoint}:{cfg.iot_port} as {cfg.thing_name}")
@@ -236,8 +268,9 @@ def main(argv=None) -> int:
             log.error("can't listen on %s: %s (is another bridge already running?)", cfg.local_api_bind, exc)
             return 2
 
+    plug = make_plug_watcher(cfg, core)
     if args.check:
-        return run_check(cfg, core, api, link)
+        return run_check(cfg, core, api, link, plug)
 
     stop = threading.Event()
 
@@ -257,10 +290,14 @@ def main(argv=None) -> int:
         log.info("local API listening on %s%s", api.url, "" if api.token else " (loopback only, no token)")
     if link is not None:
         link.start()
+    if plug is not None:
+        plug.start()
     try:
         while not stop.wait(1.0):
             pass
     finally:
+        if plug is not None:
+            plug.stop()
         if api is not None:
             api.stop()
         core.stop()
