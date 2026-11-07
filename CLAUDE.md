@@ -196,17 +196,20 @@ the wall.
 
 ## Tests and checks
 
-The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run the suite under
-3.9, 3.11 and 3.13. tests/README.md has the details, including the real-speech tests.
+The code runs on Python 3.11 only, as the Pi does: `requires-python` in pyproject.toml says so,
+and `.python-version` points uv at it. The listener needs it, as tflite-runtime has no Pi builds for
+anything newer. Nick decided on 7 November 2026 to stay on 3.11 for the foreseeable future, so test
+on 3.11 alone, and write code for it. tests/README.md has the details, including the real-speech tests.
 
     uv venv -p 3.11 .venv311                     # the Pi's Python; uv downloads it if needed
     uv pip install -p .venv311/bin/python -e '.[test]' numpy scipy
     .venv311/bin/python -m pytest -q
 
-- **The `test` extra needs Python 3.10 or later,** because amqtt does. A Mac's built-in `python3`
-  may be 3.9.
-- **To test on 3.9,** install the package with `pytest` instead of the extra. The MQTT and listener
-  tests then skip: 181 passed and 14 skipped last time.
+- **pip refuses other Pythons, but uv doesn't:** uv ignores the upper bound in `requires-python`.
+  install.sh asks uv for 3.11 by name, and here `.python-version` makes it uv's default.
+- **Two exceptions run elsewhere:** `tools/make_release.py` runs under the Mac's own `python3`
+  (3.13 now), using only the standard library. And the unused Alexa Lambda
+  (`alexa/infra/template.yaml`) runs on AWS's Python 3.13.
 - **Other skips need setting up first.** The Alexa schema tests and the real-speech tests skip until
   that's done, as tests/README.md describes.
 
