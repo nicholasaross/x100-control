@@ -19,7 +19,7 @@ pytest.importorskip("scipy")
 from x100_listener import main as lmain  # noqa: E402
 from x100_listener.audio import (FRAME, FRAME_SECONDS, RATE, FrameAssembler, MicError, MicSource,  # noqa: E402
                                  WavSource, read_wav, write_wav)
-from x100_listener.chimes import CHIMES, NullChimes, duration, tone  # noqa: E402
+from x100_listener.chimes import CHIMES, NullChimes, chime_for, duration, tone  # noqa: E402
 from x100_listener.client import Result  # noqa: E402
 from x100_listener.commands import Phrase, build_phrases, normalise  # noqa: E402
 from x100_listener.config import ListenerConfig, parse_extra_phrases  # noqa: E402
@@ -125,7 +125,8 @@ def test_a_queued_command_gets_its_own_chime():
     times in October. A queued command now sounds different: two level notes."""
     rig = Rig(dispatch=lambda phrase: Result(True, deferred=True, seconds=0.05))
     rig.play(SIL, SIL, WAKE, SIL, PRO, ON, SIL)
-    assert rig.chimes.played == ["queued"]
+    assert rig.chimes.played == ["queued_on"]  # said out loud, or the level notes without its clip
+    assert chime_for("queued_on") == chime_for("queued_off") == "queued"
     assert "queued until the projector is ready" in rig.events[-1].detail["outcome"]
 
 
@@ -234,10 +235,11 @@ def test_preroll_catches_a_command_begun_before_the_wake_word_fired():
     assert without.sent == [] and "timeout" in without.kinds()
 
 
-def test_a_failed_command_plays_the_fail_chime():
+def test_a_failed_command_says_why():
     rig = Rig(dispatch=lambda phrase: Result(False, "BRIDGE_UNREACHABLE", "http://jetson:8661: refused"))
     rig.play(WAKE, PRO, ON)
-    assert rig.chimes.played == ["fail"]
+    assert rig.chimes.played == ["bridge_down"]  # said out loud, or the falling notes without its clip
+    assert chime_for("bridge_down") == "fail"
     assert rig.events[-1].detail["ok"] is False and "BRIDGE_UNREACHABLE" in rig.events[-1].detail["outcome"]
 
 

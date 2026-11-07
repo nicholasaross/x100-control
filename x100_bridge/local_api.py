@@ -3,6 +3,8 @@
     POST /command   {"ops": [{"op": "power", "value": "ON"}]}
                     200 {"id": "...", "ok": true, "deferred": false, "state": {...}}
                     200 {"ok": false, "code": "ENDPOINT_UNREACHABLE", "message": "...", ...}
+                    (and "reason": "plug_off", say: a word for the listener to say it
+                    out loud; see BridgeError in core.py)
     GET  /state     200 the full state: power, input, volume, muted, inputs, scenes
     GET  /healthz   200 {"ok": true, "version": "...", "build": "..."}  (no token needed)
 

@@ -42,6 +42,7 @@ from .audio import FRAME_SECONDS, write_wav
 from .chimes import ChimePlayer
 from .client import Result
 from .commands import CommandSpotter, Phrase
+from .replies import reply_for
 from .wake import WakeDetector
 
 log = logging.getLogger("x100.listener")
@@ -218,7 +219,7 @@ class Listener:
                 result = Result(False, "LISTENER_ERROR", str(exc))
             self._emit("result", t, phrase=phrase.text.lower(), ok=result.ok, outcome=result.describe(),
                        bridge_ms=round(result.seconds * 1000), total_ms=round((self.clock() - heard_at) * 1000))
-            self.chimes.play(("queued" if result.deferred else "ok") if result.ok else "fail")
+            self.chimes.play(reply_for(result, phrase.ops))
 
         self.run(job)
 

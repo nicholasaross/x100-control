@@ -4,11 +4,14 @@
                            silero_vad.onnx                          (openWakeWord v0.5.1 release)
     models/kws/            encoder/decoder/joiner (int8), tokens.txt, bpe.model
                            (sherpa-onnx gigaspeech keyword-spotting model, 3.3M parameters)
+    models/voice/          the voice for the spoken replies (replies.py): Piper's semaine voice,
+                           built for sherpa-onnx, with its espeak-ng-data
 
 All files come from the projects' GitHub releases and are checked against the
 SHA-256 values below, so a corrupted or tampered download is refused.
 openWakeWord's pre-trained models are licensed CC BY-NC-SA 4.0 (personal use is
-fine); the sherpa-onnx model is Apache 2.0.
+fine); the sherpa-onnx model is Apache 2.0; the semaine voice's recordings are
+CC BY-NC-SA 4.0 too.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ import tarfile
 import tempfile
 import urllib.request
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import BinaryIO, Callable, Dict, List, Optional
 
 log = logging.getLogger("x100.listener.models")
 
@@ -44,6 +47,16 @@ KWS_FILES: Dict[str, str] = {
     f"joiner-{KWS_STEM}": "eae9da0c7e1e6c6a3f4cc42d167899c388f6c6701b94cb96320e4f55df79624c",
     "tokens.txt": "fd2ded4050a55d2b1578870ba8697d02371980217806b7558bd0a5cc60f3ba53",
     "bpe.model": "c8a2a0129c4ab8e463164c142f82d25649661b122c8cd0b7aab5c9e80b90ad24",
+}
+
+
+VOICE_NAME = "vits-piper-en_GB-semaine-medium"
+VOICE_URL = f"https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/{VOICE_NAME}.tar.bz2"
+VOICE_SHA256 = "b2a1e39062fce8f7fb14b7fa5fb93d89c58e3af2245270387f408099f5a2da9f"
+VOICE_MODEL = "en_GB-semaine-medium.onnx"
+VOICE_FILES: Dict[str, str] = {
+    VOICE_MODEL: "9e4578375a86fd6354c03f4994f5d9494e57642ed2b60a91b71981e4fcc7abe0",
+    "tokens.txt": "ef3a7e4a8d1af0c9d4dc45aaae1a6242ebe24a7ed6f3d025a49eb29682784c6d",
 }
 
 
@@ -75,6 +88,17 @@ class ModelPaths:
     def kws(self, name: str) -> str:
         return os.path.join(self.kws_dir, name)
 
+    @property
+    def voice_dir(self) -> str:
+        return os.path.join(self.root, "voice")
+
+    def voice(self, name: str) -> str:
+        return os.path.join(self.voice_dir, name)
+
+    @property
+    def replies_dir(self) -> str:
+        return os.path.join(self.root, "replies")
+
     def missing(self, wake_model: str = "hey_jarvis_v0.1", vad: bool = False) -> List[str]:
         needed = [self.oww("melspectrogram.onnx"), self.oww("embedding_model.onnx"), self.wake_model(wake_model)]
         if vad:
@@ -101,7 +125,8 @@ def verify(paths: ModelPaths) -> List[str]:
     """Checksum problems with the model files that are present (an empty list means all fine)."""
     bad = []
     for path, digest in [(paths.oww(n), d) for n, d in OWW_FILES.items()] + \
-                        [(paths.kws(n), d) for n, d in KWS_FILES.items()]:
+                        [(paths.kws(n), d) for n, d in KWS_FILES.items()] + \
+                        [(paths.voice(n), d) for n, d in VOICE_FILES.items()]:
         if os.path.isfile(path) and sha256_file(path) != digest:
             bad.append(f"{path} doesn't match its published checksum; run --download-models --force")
     return bad
@@ -146,6 +171,70 @@ def download(paths: ModelPaths, fetch: Callable[[str], bytes] = _fetch, force: b
             found += 1
     if found != len(KWS_FILES):
         raise ModelError(f"{KWS_NAME}: archive is missing files ({found} of {len(KWS_FILES)} found)")
+
+
+def _fetch_to(url: str, out: BinaryIO, timeout: float = 60.0) -> None:
+    """Like _fetch, but straight to a file: the voice is 80 MB, and the Pi 3 has 1 GB."""
+    req = urllib.request.Request(url, headers={"User-Agent": "x100-listener"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        shutil.copyfileobj(resp, out, 1 << 20)
+
+
+def have_voice(paths: ModelPaths) -> bool:
+    return (os.path.isdir(paths.voice("espeak-ng-data"))
+            and all(os.path.isfile(paths.voice(n)) and sha256_file(paths.voice(n)) == d for n, d in VOICE_FILES.items()))
+
+
+def download_voice(paths: ModelPaths, fetch_to: Callable[[str, BinaryIO], None] = _fetch_to, force: bool = False,
+                   report: Optional[Callable[[str], None]] = print) -> None:
+    """The voice for the spoken replies, checked against its published checksum, then unpacked. Only plain
+    files and folders inside the archive's own folder are unpacked: anything else is refused."""
+    say = report or (lambda _msg: None)
+    if not force and have_voice(paths):
+        say(f"  have the voice ({VOICE_NAME})")
+        return
+    say(f"  downloading {VOICE_NAME} (80 MB)")
+    os.makedirs(paths.root, exist_ok=True)
+    fd, archive = tempfile.mkstemp(dir=paths.root, prefix=".voice-", suffix=".tar.bz2")
+    unpacked = tempfile.mkdtemp(dir=paths.root, prefix=".voice-")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fetch_to(VOICE_URL, fh)
+        if sha256_file(archive) != VOICE_SHA256:
+            raise ModelError(f"{VOICE_NAME}: checksum mismatch, refusing to install it")
+        _unpack_voice(archive, unpacked)
+        for name, digest in VOICE_FILES.items():
+            path = os.path.join(unpacked, name)
+            if not os.path.isfile(path) or sha256_file(path) != digest:
+                raise ModelError(f"{VOICE_NAME}/{name}: missing, or doesn't match its checksum")
+        if os.path.isdir(paths.voice_dir):
+            shutil.rmtree(paths.voice_dir)
+        os.rename(unpacked, paths.voice_dir)
+    finally:
+        os.unlink(archive)
+        if os.path.isdir(unpacked):
+            shutil.rmtree(unpacked)
+
+
+def _unpack_voice(archive: str, dest: str) -> None:
+    prefix = VOICE_NAME + "/"
+    with tarfile.open(archive, mode="r:bz2") as tar:
+        for member in tar:
+            if member.name.rstrip("/") == VOICE_NAME:
+                continue
+            parts = member.name[len(prefix):].split("/") if member.name.startswith(prefix) else []
+            if not parts or member.name.startswith("/") or any(p in ("", ".", "..") for p in parts) or \
+                    not (member.isfile() or member.isdir()):
+                raise ModelError(f"{VOICE_NAME}: unexpected entry {member.name!r} in the archive, refusing it")
+            target = os.path.join(dest, *parts)
+            if member.isdir():
+                os.makedirs(target, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            src = tar.extractfile(member)
+            assert src is not None
+            with src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out, 1 << 20)
 
 
 def _write_atomic(dest: str, data: bytes) -> None:

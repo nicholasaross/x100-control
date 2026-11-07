@@ -226,12 +226,15 @@ def parse_scenes(text: str) -> Dict[str, int]:
 
 
 class BridgeError(Exception):
-    """An error with an Alexa ErrorResponse type attached."""
+    """An error with an Alexa ErrorResponse type attached. ``reason``, where there is one, says in a word what
+    went wrong, for the listener to say so out loud (x100_listener/replies.py): "plug_off", "plug_checking",
+    "booting", "unreachable", "not_started", "just_started", "looks_on", "projector_off" or "refused"."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, reason: str = ""):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.reason = reason
 
 
 @dataclass
@@ -461,9 +464,9 @@ class BridgeCore:
             error = exc
         except Unreachable as exc:
             self._link_failed()
-            error = BridgeError("ENDPOINT_UNREACHABLE", f"projector unreachable: {exc}")
+            error = BridgeError("ENDPOINT_UNREACHABLE", f"projector unreachable: {exc}", "unreachable")
         except FunctionDisabled as exc:
-            error = BridgeError("NOT_IN_OPERATION", f"projector refused the command: {exc}")
+            error = BridgeError("NOT_IN_OPERATION", f"projector refused the command: {exc}", "refused")
         except (ProjectorError, ValueError) as exc:
             error = BridgeError("INTERNAL_ERROR", str(exc))
         self._fast_poll()
@@ -658,7 +661,7 @@ class BridgeCore:
         log.warning("the projector acknowledged power on but hasn't started%s", self._since_off_text())
         raise BridgeError("NOT_IN_OPERATION", "the projector acknowledged 'on' but hasn't started. If it was "
                           "switched on at the wall in the last few minutes it may still start; if not, and its "
-                          "remote can't start it either, switch it off at the wall for 30 seconds")
+                          "remote can't start it either, switch it off at the wall for 30 seconds", "not_started")
 
     def _believed_off(self) -> bool:
         """Off by a recent reading: an "on" can go straight out without asking first."""
@@ -739,7 +742,8 @@ class BridgeCore:
                         ago = f" {time.monotonic() - since:.0f} s ago" if since is not None else ""
                         raise BridgeError("NOT_IN_OPERATION", f"the projector was started{ago} but looks like "
                                           "it's in standby, and another 'on' this soon can hang it. If it hasn't "
-                                          "started in a minute or two, switch it off at the wall for 30 seconds")
+                                          "started in a minute or two, switch it off at the wall for 30 seconds",
+                                          "just_started")
                     return False  # it's starting up
                 if power == PowerState.COOLING:
                     return self._defer(op, PowerState.OFF, cmd_id)
@@ -767,7 +771,7 @@ class BridgeCore:
                 raise BridgeError("INVALID_VALUE", f"input {value!r} isn't configured")
             if power in (PowerState.OFF, PowerState.COOLING):
                 if not self.cfg.auto_power_on:
-                    raise BridgeError("NOT_IN_OPERATION", "projector is off")
+                    raise BridgeError("NOT_IN_OPERATION", "projector is off", "projector_off")
                 self._apply({"op": "power", "value": "ON"}, cmd_id)
                 return self._defer({"op": "input", "value": d.alexa}, PowerState.ON, cmd_id)
             if power == PowerState.WARMING or queued:
@@ -782,7 +786,7 @@ class BridgeCore:
                     (power in (PowerState.OFF, PowerState.COOLING) and self._power_on_pending()):
                 return self._defer(op, PowerState.ON, cmd_id)
             if power in (PowerState.OFF, PowerState.COOLING):
-                raise BridgeError("NOT_IN_OPERATION", "projector is off")
+                raise BridgeError("NOT_IN_OPERATION", "projector is off", "projector_off")
             self._run_simple(kind, value)
             return False
 
@@ -795,7 +799,7 @@ class BridgeCore:
             raise BridgeError("NOT_IN_OPERATION", "the projector looks on, but after a power cut its standby can "
                               "look just the same, and it hasn't been seen in standby or starting since "
                               f"{self._doubt_on}, so the bridge has sent nothing. If it isn't on, start it with "
-                              "its remote this once: after that the bridge can tell again")
+                              "its remote this once: after that the bridge can tell again", "looks_on")
 
     @staticmethod
     def _validate(kind: str, value: Any) -> None:
@@ -980,17 +984,20 @@ class BridgeCore:
         """Before anything is sent: not a word to a projector that's booting, or isn't answering."""
         if self._plug_output is False:
             raise BridgeError("ENDPOINT_UNREACHABLE", "the projector's plug has switched its power off. Once it's "
-                              "back on, the bridge leaves the projector alone for a few minutes while it boots")
+                              "back on, the bridge leaves the projector alone for a few minutes while it boots",
+                              "plug_off")
         if self._plug_check_until is not None:
             raise BridgeError("NOT_IN_OPERATION", "the projector's plug has just reconnected, and may have restarted, "
-                              "which cuts the projector's power. The bridge is checking: try again in a few seconds")
+                              "which cuts the projector's power. The bridge is checking: try again in a few seconds",
+                              "plug_checking")
         if self._quiet():
             raise BridgeError("NOT_IN_OPERATION", f"the projector may still be booting after a power cut, so it's "
                               f"being left alone until {self._quiet_end()}: questions while it boots can hang it. "
-                              "Its remote works sooner, once it has started up")
+                              "Its remote works sooner, once it has started up", "booting")
         if self._link_down():
             raise BridgeError("ENDPOINT_UNREACHABLE", "the projector isn't answering (switched off at the wall?). "
-                              "Once it's back, the bridge leaves it alone for a few minutes while it boots")
+                              "Once it's back, the bridge leaves it alone for a few minutes while it boots",
+                              "unreachable")
 
     def _probe_link(self) -> None:
         """While it isn't answering, ask only the power query: the X100-4K answers that even while
@@ -1192,6 +1199,8 @@ class BridgeCore:
                              "state": self.compact_state()}
             if error is not None:
                 waiter.result["code"], waiter.result["message"] = error.code, error.message
+                if error.reason:
+                    waiter.result["reason"] = error.reason
             waiter.event.set()
         self._publish_state(extra={"ack": ack})
 

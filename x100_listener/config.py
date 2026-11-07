@@ -75,6 +75,7 @@ class ListenerConfig:
     chime_volume: float = 0.3
     wake_chime: bool = False
     unclear_chime: bool = True          # the low note after "Hey Jarvis" with no command
+    replies: str = "voice"              # "voice": say what went wrong (replies.py); "chimes": beeps only
     # diagnostics
     save_clips_dir: Optional[str] = None
 
@@ -110,6 +111,7 @@ class ListenerConfig:
             chime_volume=_float("CHIME_VOLUME", 0.3),
             wake_chime=_bool("WAKE_CHIME", False),
             unclear_chime=_bool("UNCLEAR_CHIME", True),
+            replies=(os.environ.get("REPLIES") or "voice").strip().lower(),
             save_clips_dir=_opt("SAVE_CLIPS_DIR"),
         )
 
@@ -133,6 +135,8 @@ class ListenerConfig:
             out.append("COMMAND_WINDOW must be at least 1 s, and PREROLL / COOLDOWN not negative")
         if not 0 <= self.chime_volume <= 1:
             out.append("CHIME_VOLUME must be between 0 and 1")
+        if self.replies not in ("voice", "chimes"):
+            out.append(f"REPLIES must be voice or chimes (got {self.replies!r})")
         return out
 
 

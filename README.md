@@ -34,14 +34,19 @@ Say "Hey Jarvis", then the command, in one breath or with a pause of up to 3.5 s
 | "Hey Jarvis, projector on" / "…turn on the projector" / "…switch on the projector" | Power on, including from standby |
 | "Hey Jarvis, projector off" / "…turn off the projector" / "…turn the projector off" | Power off |
 
-What the chimes mean:
+What you hear back:
 
 | You hear | Meaning |
 |---|---|
 | two rising notes | done: the projector accepted it |
-| two level notes | accepted, but it waits until the projector is ready: an "off" in the 2 minutes after a start, say |
-| two falling notes | the bridge or the projector said no, or couldn't be reached (the log says which) |
+| a gruff voice | anything else, said out loud: "Righto. It'll go off in a minute or two." when it waits (an "off" in the 2 minutes after a start, say), and what went wrong when it didn't work, such as "The plug's switched off…" or "The power's only just come back. Give it a few minutes." The log says more. |
 | one low note | heard "Hey Jarvis" but no command after it |
+
+The voice is Piper's semaine voice, as its gloomy "Obadiah", made lower and gruffer. The install makes
+its clips once, downloading the voice (80 MB) the first time. `x100-listener --env-file listener.env
+--play-replies` plays them all, to check how they sound and how loud (`CHIME_VOLUME` sets both). The lines
+are in `x100_listener/replies.py`. Without the clips, or with `REPLIES=chimes` in listener.env, you hear
+chimes instead: two level notes when it waits, and two falling notes when anything went wrong.
 
 More phrases (inputs, mute, volume) are one line of settings each: see [More commands](#more-commands).
 
@@ -244,7 +249,7 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
   a start or hours later. Why isn't known yet: the bridge's log now records what came before each
   hang. So the bridge:
   * asks only the power question once the projector stops answering, every 30 s, and when it answers
-    again sends nothing at all for 5 minutes. Commands in that time get the two falling notes, and
+    again sends nothing at all for 5 minutes. Commands in that time get a spoken reply saying so, and
     the log says until when; the remote works once the projector has started up. Then it reads it
     once, to see whether it's on or in standby;
   * in standby, asks only the power question, every 2 s, and the rest only when a command comes. A
@@ -259,7 +264,7 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
     command within 5 minutes of a cut too short to see can still hang it;
   * after a power cut, sometimes finds its standby answering just as if it were on, until it's next
     started. So after a cut, and after the bridge itself restarts, until it has seen the projector in
-    standby or starting, "on" (or an input) gets the two falling notes, and the log says to start it
+    standby or starting, "on" (or an input) gets a spoken reply, and the log says to start it
     with its remote this once. "Off" works as usual;
   * leaves the projector alone for the first 5 minutes after the Pi itself starts, since a mains cut
     takes out both;
@@ -326,14 +331,15 @@ woke it" is always slower, as it replays the last 0.5 s into the spotter; the ne
 | Power commands behave oddly (ignored, or "on" straight after "off" does nothing) | With the bridge stopped, `x100ctl --env-file bridge.env trace off` (or `trace on`) sends the command and logs what the projector reports every second until it settles, with a summary at the end. |
 | No reaction, no chime | Watch `journalctl -u x100-listener -f` while you speak. No "wake word" line: check scores with `--test-mic`, `WAKE_THRESHOLD`, the Jabra's mute button (red light) and `MIC_DEVICE`. |
 | One low note after "Hey Jarvis" | It heard the wake word but not the command. Say the command within 3.5 s, a little closer; or `KWS_BOOST=2.5`. |
-| Two falling notes | The log line says why. `BRIDGE_UNREACHABLE`: `x100-bridge` isn't running (`systemctl status x100-bridge`). `UNAUTHORIZED`: `BRIDGE_TOKEN` doesn't match `LOCAL_API_TOKEN`. `ENDPOINT_UNREACHABLE`: the bridge can't reach the projector (cable, adapter, RS-232 Control). |
+| Two falling notes or a spoken reply | The log line says why. `BRIDGE_UNREACHABLE`: `x100-bridge` isn't running (`systemctl status x100-bridge`). `UNAUTHORIZED`: `BRIDGE_TOKEN` doesn't match `LOCAL_API_TOKEN`. `ENDPOINT_UNREACHABLE`: the bridge can't reach the projector (cable, adapter, RS-232 Control). |
+| Chimes where you'd expect the voice | Its clips aren't made yet: the listener's log says which. Run `cd /opt/x100-control && sudo -u x100 .venv/bin/x100-listener --env-file listener.env --make-replies`, then `sudo systemctl restart x100-listener`. Or `REPLIES=chimes` is set in listener.env. |
 | Two rising notes but nothing happened | It probably heard the other command (on/off) and there was nothing to do. Say it again. |
-| Two falling notes after "on", and the log says the projector "hasn't started" | It acknowledged "on" but stayed in standby: it has probably hung. If its remote can't start it either, switch it off at the wall for 2 minutes, back on, and leave it 3 minutes before using the remote (the bridge stays quiet meanwhile). |
-| Two falling notes, and the log says the projector "may still be booting" | It stopped answering for a while (a power cut, say), and questions while it boots can hang it, so the bridge leaves it alone for 5 minutes after it answers again (the log says until when). Its remote works once it has started up. |
-| Two falling notes, and the log says the projector's plug "has switched its power off" | The plug's output is off, so the projector has no power. Switch it back on with the plug's button. Then the bridge leaves the projector alone for 5 minutes while it boots. |
-| Two falling notes, and the log says the projector's plug "has just reconnected" | The plug may have restarted, which cuts the projector's power. The bridge waits for the plug's next reading, for up to 10 s. Try again then. |
+| Two falling notes or a spoken reply after "on", and the log says the projector "hasn't started" | It acknowledged "on" but stayed in standby: it has probably hung. If its remote can't start it either, switch it off at the wall for 2 minutes, back on, and leave it 3 minutes before using the remote (the bridge stays quiet meanwhile). |
+| Two falling notes or a spoken reply, and the log says the projector "may still be booting" | It stopped answering for a while (a power cut, say), and questions while it boots can hang it, so the bridge leaves it alone for 5 minutes after it answers again (the log says until when). Its remote works once it has started up. |
+| Two falling notes or a spoken reply, and the log says the projector's plug "has switched its power off" | The plug's output is off, so the projector has no power. Switch it back on with the plug's button. Then the bridge leaves the projector alone for 5 minutes while it boots. |
+| Two falling notes or a spoken reply, and the log says the projector's plug "has just reconnected" | The plug may have restarted, which cuts the projector's power. The bridge waits for the plug's next reading, for up to 10 s. Try again then. |
 | The bridge's log says it "can't read the projector's plug" | The bridge carries on without it. Check `X100_PLUG_MQTT` and that the broker is running, then `x100-bridge --env-file bridge.env --check`. |
-| Two falling notes, and the log says the projector "looks on, but after a power cut its standby can look just the same" | After a power cut, its standby sometimes answers just like on. So after one, or after the bridge restarts, the bridge can't tell whether it's on. If it isn't, start it with its remote this once. After that, voice works as usual. |
+| Two falling notes or a spoken reply, and the log says the projector "looks on, but after a power cut its standby can look just the same" | After a power cut, its standby sometimes answers just like on. So after one, or after the bridge restarts, the bridge can't tell whether it's on. If it isn't, start it with its remote this once. After that, voice works as usual. |
 | Wondering what the projector does as it powers up | With the bridge stopped: `x100ctl --env-file bridge.env listen` sends nothing and prints anything it says by itself; `trace --power-only` asks only the power question, once a second. Plain `trace` asks everything, which hangs it if it's booting. |
 | The low note during films | The soundtrack set off the wake word: raise `WAKE_THRESHOLD`, move the Jabra away from the speakers, or `UNCLEAR_CHIME=false`. |
 | `--test-mic` shows overruns, or frames near 80 ms | The Pi is falling behind: `--check` for under-voltage (use the 2.5 A supply), compare `WAKE_THREADS` and `KWS_THREADS` (see [Speed on the Pi 3](#speed-on-the-pi-3)), or a Pi 4. |
@@ -352,7 +358,7 @@ included, works against the simulator. (`--port 4661` instead simulates the LAN 
 * **Listening:** openWakeWord scores each 80 ms frame for "Hey Jarvis". When it fires, the last
   0.5 s of audio plus the next 3.5 s go to sherpa-onnx's keyword spotter, so a command said in the same
   breath isn't clipped; the wake word rests meanwhile, so a Pi 3 only ever runs one of them. After a
-  command there's a 2-second pause before it listens again, and the mic is ignored while a chime plays
+  command there's a 2-second pause before it listens again, and the mic is ignored while a chime or spoken reply plays
   so it can't hear itself.
 * **The bridge** answers as soon as the projector accepts the write, except that an "on" is answered
   once the projector has visibly started (see above). During warm-up and cool-down the projector
@@ -428,7 +434,8 @@ listener running on a Linux machine. The listener only sees an `AudioSource` and
 x100/             projector library: protocol, serial/TCP transports, PJLink, simulator, x100ctl
 x100_bridge/      the bridge: command handling and state (core.py), local HTTP API (local_api.py),
                   the optional smart plug on the projector's mains (plug.py)
-x100_listener/    the listener: audio in, wake word, command spotter, state machine, chimes, CLI
+x100_listener/    the listener: audio in, wake word, command spotter, state machine, chimes and spoken
+                  replies, CLI
 deploy/           install.sh, systemd units, settings examples
 tools/            check-pi-wheels.sh: checks every listener package has a 64-bit ARM build;
                   make_release.py: builds the zip and stamps its build ID

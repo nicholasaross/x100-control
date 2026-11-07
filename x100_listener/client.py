@@ -19,6 +19,7 @@ class Result:
     deferred: bool = False
     seconds: float = 0.0
     state: Optional[Dict[str, Any]] = None
+    reason: str = ""  # the bridge's word for what went wrong ("plug_off", say), to say it out loud
 
     def describe(self) -> str:
         if self.code == "DRY_RUN":
@@ -61,7 +62,7 @@ class BridgeClient:
         except ValueError as exc:  # not JSON
             return Result(False, "BAD_RESPONSE", str(exc), seconds=time.monotonic() - started)
         return Result(bool(doc.get("ok")), doc.get("code", ""), doc.get("message", ""), bool(doc.get("deferred")),
-                      time.monotonic() - started, doc.get("state"))
+                      time.monotonic() - started, doc.get("state"), str(doc.get("reason") or ""))
 
     def health(self) -> Dict[str, Any]:
         return self._request("GET", "/healthz", auth=False)

@@ -6,6 +6,8 @@ never stored (unless SAVE_CLIPS_DIR is set) or sent anywhere.
 
     x100-listener --env-file listener.env                    run (what the systemd unit does)
     x100-listener --env-file listener.env --download-models  fetch the models (once)
+    x100-listener --env-file listener.env --make-replies     make the spoken replies (once)
+    x100-listener --env-file listener.env --play-replies     hear them through the speaker
     x100-listener --env-file listener.env --list-devices     find your mic
     x100-listener --env-file listener.env --test-mic         live scores, nothing is sent
     x100-listener --env-file listener.env --wav clip.wav     run a recording through, nothing is sent
@@ -38,6 +40,8 @@ from .commands import Phrase, SherpaKeywordSpotter, build_phrases
 from .config import ListenerConfig
 from .listener import ClipSaver, Event, Listener, Phase, Settings
 from .models import ModelError, ModelPaths, download, verify
+from .replies import LINES, load_clips, make_replies
+from .replies import missing as missing_replies
 from .wake import OpenWakeWordDetector
 
 log = logging.getLogger("x100.listener")
@@ -77,10 +81,35 @@ def make_chimes(cfg: ListenerConfig):
         log.info("the mic has no speaker (%s); chimes go to the default output", exc)
         device = None
     try:
-        return SoundDeviceChimes(device, volume=cfg.chime_volume)
+        player = SoundDeviceChimes(device, volume=cfg.chime_volume)
     except Exception as exc:
         log.warning("no chimes: can't use the audio output (%s). Set CHIME_DEVICE, or CHIMES=off.", exc)
         return NullChimes()
+    if cfg.replies == "voice":
+        # Speech peaking where a chime does sounds quieter, so twice as high: CHIME_VOLUME sets both.
+        player.use_clips(load_clips(ModelPaths(cfg.models_dir), player.rate, peak=min(1.0, 2 * cfg.chime_volume)))
+        lacking = missing_replies(ModelPaths(cfg.models_dir))
+        if lacking:
+            log.warning("no spoken reply yet for %s, so chimes instead: run `x100-listener --make-replies`",
+                        ", ".join(lacking))
+        else:
+            log.info("spoken replies on")
+    return player
+
+
+def play_replies(cfg: ListenerConfig) -> int:
+    """Each spoken reply in turn, through the chime speaker, to hear how they sound and how loud."""
+    if cfg.replies != "voice":
+        print("REPLIES=chimes: the spoken replies are off")
+    chimes = make_chimes(cfg)
+    for kind, line in LINES.items():
+        print(f"{kind}: {line}")
+        chimes.play(kind)
+        time.sleep(0.1)
+        while chimes.busy():
+            time.sleep(0.05)
+        time.sleep(0.5)
+    return 0
 
 
 def dry_run(phrase: Phrase) -> Result:
@@ -396,6 +425,13 @@ def run_check(cfg: ListenerConfig) -> int:
                   f"in {time.monotonic() - started:.1f} s")
         except Exception as exc:
             bad(f"can't load the models: {exc}")
+    if cfg.replies == "voice":
+        lacking = missing_replies(paths)
+        print(f"Spoken replies: {len(LINES) - len(lacking)} of {len(LINES)} in {os.path.abspath(paths.replies_dir)}")
+        if lacking:
+            bad("no clip yet for " + ", ".join(lacking) + " -- run --make-replies (chimes play meanwhile)")
+    else:
+        print("Spoken replies: off (REPLIES=chimes)")
 
     print("Microphone")
     try:
@@ -462,8 +498,12 @@ def main(argv=None) -> int:
     mode.add_argument("--wav", metavar="FILE", help="run a WAV recording through the listener; sends nothing")
     mode.add_argument("--check", action="store_true", help="check models, mic, bridge, token and power, then exit")
     mode.add_argument("--download-models", action="store_true", help="download and verify the model files")
+    mode.add_argument("--make-replies", action="store_true",
+                      help="make the spoken replies' clips (fetching their voice first, once)")
+    mode.add_argument("--play-replies", action="store_true", help="play each spoken reply through the speaker")
     ap.add_argument("--seconds", type=float, help="with --test-mic or --wav: stop after this long")
-    ap.add_argument("--force", action="store_true", help="with --download-models: fetch again even if present")
+    ap.add_argument("--force", action="store_true",
+                    help="with --download-models: fetch again even if present; with --make-replies: make them all again")
     ap.add_argument("--version", action="version", version=version_line(),
                     help="show which release is installed, then exit")
     args = ap.parse_args(argv)
@@ -489,6 +529,14 @@ def main(argv=None) -> int:
             download(ModelPaths(cfg.models_dir), force=args.force)
             print("Done.")
             return 0
+        if args.make_replies:
+            paths = ModelPaths(cfg.models_dir)
+            print(f"Spoken replies go in {os.path.abspath(paths.replies_dir)}")
+            make_replies(paths, force=args.force)
+            print("Done.")
+            return 0
+        if args.play_replies:
+            return play_replies(cfg)
         if args.check:
             return run_check(cfg)
         problems = cfg.problems()

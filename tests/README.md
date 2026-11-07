@@ -26,6 +26,11 @@ The code runs on Python 3.11 only, as the Pi does, so test on 3.11.
   reports it, and takes a plug that reconnects to its broker for a restart unless the projector is on.
 * `test_plug.py` – reading that plug: its MQTT status, its settings, a broker that isn't there, and a
   cut it reports over MQTT, end to end (the tests with a broker skip if `amqtt` isn't installed).
+* `test_replies.py` – the spoken replies: the bridge's reason for a refusal, the line the listener picks
+  for each answer, the gruff effect (lower, at much the same pace), making the clips once and afresh when
+  a line changes, loading them at the speaker's rate and volume, the chime a reply falls back to, and
+  fetching the voice (checked, unpacked once, and refused if it reaches outside its folder). A stand-in
+  voice is used, so nothing is downloaded. Needs numpy and scipy.
 * `test_local_api.py` – the bridge's HTTP API against the real core and the simulated projector: auth,
   malformed requests, deferral, errors, timeouts, the ack going out before the state read-back, the
   listener's client, and the real `x100-bridge` process in local-only mode.
