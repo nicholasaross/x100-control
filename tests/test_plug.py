@@ -1,7 +1,7 @@
 """The smart plug on the projector's mains (x100_bridge/plug.py): reading its MQTT status.
 
 What the bridge does with it is in test_power_quirks.py. The tests with a broker skip if amqtt isn't
-installed (it needs Python 3.10 or later).
+installed.
 """
 
 import json

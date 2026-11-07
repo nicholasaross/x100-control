@@ -3,8 +3,7 @@
     pip install -e '.[test]' numpy scipy
     pytest
 
-The `test` extra needs Python 3.10 or later (amqtt does). On 3.9, `pip install -e . pytest` instead;
-the MQTT and listener tests then skip.
+The code runs on Python 3.11 only, as the Pi does, so test on 3.11.
 
 * `test_protocol.py` – encoder/decoder checked byte-for-byte against ViewSonic's published command list.
 * `test_serial.py` – the RS-232 path, as on the Pi that does everything: the driver, the bridge (with
