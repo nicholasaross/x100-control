@@ -22,7 +22,11 @@ the MQTT and listener tests then skip.
   only about power and then leaves the projector alone, and in standby asks only about power. And
   the standby that answers like on after some power cuts: "on" there says so, rather than "ok". A
   single missed reply isn't taken for a power cut, a standby reading straight after "on" is checked
-  again, and a hang's log line says what came before it.
+  again, and a hang's log line says what came before it. And a power cycle by the plug on its
+  mains, too quick for checks once an hour to see: the bridge leaves the projector alone once the plug
+  reports it, and takes a plug that reconnects to its broker for a restart unless the projector is on.
+* `test_plug.py` – reading that plug: its MQTT status, its settings, a broker that isn't there, and a
+  cut it reports over MQTT, end to end (the tests with a broker skip if `amqtt` isn't installed).
 * `test_local_api.py` – the bridge's HTTP API against the real core and the simulated projector: auth,
   malformed requests, deferral, errors, timeouts, the ack going out before the state read-back, the
   listener's client, and the real `x100-bridge` process in local-only mode.

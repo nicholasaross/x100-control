@@ -8,7 +8,8 @@ dynamic = ["version"]   # from x100/__init__.py, so there's one place to change 
 description = "Local voice control for the ViewSonic X100-4K projector: a wake-word listener and a LAN bridge, no cloud"
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["pyserial>=3.5"]
+# paho-mqtt reads the optional smart plug on the projector's mains (x100_bridge/plug.py).
+dependencies = ["pyserial>=3.5", "paho-mqtt>=2.0"]
 
 [project.optional-dependencies]
 # The voice listener (the Raspberry Pi). On Linux openWakeWord pulls in

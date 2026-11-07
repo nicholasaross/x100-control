@@ -263,6 +263,13 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
     with its remote this once. "Off" works as usual;
   * leaves the projector alone for the first 5 minutes after the Pi itself starts, since a mains cut
     takes out both;
+  * with a smart plug on the projector's mains that reports over MQTT (a Shelly Plus Plug, say),
+    sees every power cut, however short. While the plug's output is off, it sends the projector
+    nothing, and once it's back on it gives it the 5 minutes' quiet. A plug that reconnects to its
+    MQTT broker may have restarted, which cuts the power too. So until the plug's next reading, for
+    up to 10 s, it sends nothing, then takes it as a cut unless the projector is drawing full power.
+    It only reads the plug, and never switches it. `X100_PLUG_MQTT` and `X100_PLUG_PREFIX` in
+    `bridge.env` turn this on (the example file says how), and `x100-bridge --check` tests them;
   * sends no power command for 2 minutes after the projector starts (by voice, remote or its button):
     an "off" waits, and a repeated "on" isn't sent;
   * never sends "on" by itself, and says "ok" to an "on" only once the projector has visibly started
@@ -323,6 +330,9 @@ woke it" is always slower, as it replays the last 0.5 s into the spotter; the ne
 | Two rising notes but nothing happened | It probably heard the other command (on/off) and there was nothing to do. Say it again. |
 | Two falling notes after "on", and the log says the projector "hasn't started" | It acknowledged "on" but stayed in standby: it has probably hung. If its remote can't start it either, switch it off at the wall for 2 minutes, back on, and leave it 3 minutes before using the remote (the bridge stays quiet meanwhile). |
 | Two falling notes, and the log says the projector "may still be booting" | It stopped answering for a while (a power cut, say), and questions while it boots can hang it, so the bridge leaves it alone for 5 minutes after it answers again (the log says until when). Its remote works once it has started up. |
+| Two falling notes, and the log says the projector's plug "has switched its power off" | The plug's output is off, so the projector has no power. Switch it back on with the plug's button. Then the bridge leaves the projector alone for 5 minutes while it boots. |
+| Two falling notes, and the log says the projector's plug "has just reconnected" | The plug may have restarted, which cuts the projector's power. The bridge waits for the plug's next reading, for up to 10 s. Try again then. |
+| The bridge's log says it "can't read the projector's plug" | The bridge carries on without it. Check `X100_PLUG_MQTT` and that the broker is running, then `x100-bridge --env-file bridge.env --check`. |
 | Two falling notes, and the log says the projector "looks on, but after a power cut its standby can look just the same" | After a power cut, its standby sometimes answers just like on. So after one, or after the bridge restarts, the bridge can't tell whether it's on. If it isn't, start it with its remote this once. After that, voice works as usual. |
 | Wondering what the projector does as it powers up | With the bridge stopped: `x100ctl --env-file bridge.env listen` sends nothing and prints anything it says by itself; `trace --power-only` asks only the power question, once a second. Plain `trace` asks everything, which hangs it if it's booting. |
 | The low note during films | The soundtrack set off the wake word: raise `WAKE_THRESHOLD`, move the Jabra away from the speakers, or `UNCLEAR_CHIME=false`. |
@@ -416,7 +426,8 @@ listener running on a Linux machine. The listener only sees an `AudioSource` and
 
 ```
 x100/             projector library: protocol, serial/TCP transports, PJLink, simulator, x100ctl
-x100_bridge/      the bridge: command handling and state (core.py), local HTTP API (local_api.py)
+x100_bridge/      the bridge: command handling and state (core.py), local HTTP API (local_api.py),
+                  the optional smart plug on the projector's mains (plug.py)
 x100_listener/    the listener: audio in, wake word, command spotter, state machine, chimes, CLI
 deploy/           install.sh, systemd units, settings examples
 tools/            check-pi-wheels.sh: checks every listener package has a 64-bit ARM build;

@@ -1033,3 +1033,140 @@ def test_a_bridge_on_a_computer_thats_been_up_a_while_starts_straight_away(x100)
         assert wait_for(lambda: core.state.connected, limit=2) and not core._quiet()
     finally:
         core.stop()
+
+
+# ---------------------------------------------------------------------------- the projector's plug
+
+
+HOURLY = dict(POWER_CUT, power_check_seconds=3600, plug_check_seconds=1.0)  # in standby, "power?" once an hour
+
+
+def hourly_checks_under_way(core):
+    """In standby, the bridge has settled into asking only "power?", and not again for an hour."""
+    assert wait_for(lambda: core._next_poll - time.monotonic() > 60, limit=3)
+
+
+def plug_cycle(srv, core=None, off_for=0.3):
+    """The plug switched off and on again, too quickly for the bridge's own checks to see. With ``core``,
+    the plug reports it, as it does over MQTT."""
+    with srv.state.lock:
+        srv.state.power_cut()
+    if core is not None:
+        core.plug_status(False, 0.0, "button")
+    time.sleep(off_for)
+    with srv.state.lock:
+        srv.state.power_restored()
+    if core is not None:
+        core.plug_status(True, 1.0, "button")
+
+
+def test_a_plug_cycle_between_hourly_checks_used_to_hang_it(x100):
+    """On 7 November 2026 the projector hung in standby, and was power-cycled with its plug's button. With
+    checks once an hour, the bridge saw nothing, so an "on" while it booted went straight to it."""
+    booting_x100(x100)
+    core = bridge(x100, **HOURLY)
+    try:
+        hourly_checks_under_way(core)
+        plug_cycle(x100)
+        assert core._quiet_until == 0.0 and core._lost_since is None  # it never knew
+        core.submit_and_wait(ON)
+        assert "W 11 00 (booting)" in x100.state.log and x100.state.hung
+    finally:
+        core.stop()
+
+
+def test_a_plug_cycle_the_plug_reports_gets_it_left_alone(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    booting_x100(x100)
+    core = bridge(x100, **HOURLY)
+    try:
+        hourly_checks_under_way(core)
+        heard = len(x100.state.log)
+        plug_cycle(x100, core)
+        refused = core.submit_and_wait(ON)
+        assert not refused["ok"] and refused["code"] == "NOT_IN_OPERATION"
+        assert "may still be booting" in refused["message"]
+        time.sleep(1.0)  # well into the quiet
+        assert len(x100.state.log) == heard  # not a word while it boots, not even the "on"
+        assert any("plug has switched its power back on (button)" in r.getMessage() for r in caplog.records)
+        assert wait_for(lambda: not core._quiet(), limit=3)
+        assert not x100.state.hung and core.submit_and_wait(ON)["ok"]
+        assert wait_for(lambda: x100.state.power == PowerState.ON, limit=4)
+    finally:
+        core.stop()
+
+
+def test_while_the_plug_is_off_commands_get_an_answer_and_the_projector_hears_nothing(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    booting_x100(x100)
+    core = bridge(x100, **POWER_CUT)  # a power check every 0.2 s
+    try:
+        with x100.state.lock:
+            x100.state.power_cut()
+        core.plug_status(False, 0.0, "button")
+        off = core.submit_and_wait(ON)
+        assert not off["ok"] and off["code"] == "ENDPOINT_UNREACHABLE"
+        assert "plug has switched its power off" in off["message"]
+        time.sleep(0.6)
+        assert core._lost_since is None and not core._quiet()  # it knows why: no checks, no probes
+        with x100.state.lock:
+            x100.state.power_restored()
+        core.plug_status(True, 1.0, "timer")  # its auto_on, 2 minutes later
+        assert wait_for(core._quiet, limit=2)
+        assert wait_for(lambda: not core._quiet() and core.state.connected, limit=4)
+        assert [e for e in x100.state.log if "(booting)" in e] == []
+        with x100.state.lock:
+            x100.state.hung = True  # say it hangs in standby anyway: the log says what came before
+        assert not core.submit_and_wait(ON)["ok"]
+        assert any("(the plug switched its power off and on)" in r.getMessage() for r in caplog.records)
+    finally:
+        core.stop()
+
+
+def test_a_plug_restart_is_taken_for_a_cut_unless_the_projector_is_drawing_full_power(x100):
+    """A restart of the plug cuts the projector's power too (one for a settings change went unseen on 2
+    November). The plug says so only by reconnecting to the broker, so the bridge waits for its reading."""
+    booting_x100(x100)
+    core = bridge(x100, **HOURLY)
+    try:
+        hourly_checks_under_way(core)
+        heard = len(x100.state.log)
+        plug_cycle(x100)
+        core.plug_reconnected()
+        checking = core.submit_and_wait(ON)
+        assert not checking["ok"] and "checking" in checking["message"]
+        core.plug_status(True, 12.1, "init")  # standby power: it may well have been cut
+        assert wait_for(core._quiet, limit=2)
+        assert not core.submit_and_wait(ON)["ok"]
+        assert len(x100.state.log) == heard
+        assert wait_for(lambda: not core._quiet(), limit=3)
+        assert not x100.state.hung and core.submit_and_wait(ON)["ok"]
+    finally:
+        core.stop()
+
+
+def test_a_plug_that_reconnects_and_says_nothing_is_taken_to_have_restarted(x100):
+    core = bridge(x100, **HOURLY)
+    try:
+        hourly_checks_under_way(core)
+        core.plug_reconnected()
+        assert wait_for(lambda: core._plug_check_until is not None, limit=1)
+        assert not core._quiet()
+        assert wait_for(core._quiet, limit=3)  # after plug_check_seconds
+    finally:
+        core.stop()
+
+
+def test_a_plug_that_reconnects_while_the_projector_is_on_didnt_cut_it(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core = bridge(x100, **HOURLY)
+    try:
+        assert core.submit_and_wait(ON)["ok"]
+        assert wait_for(lambda: core.state.power == PowerState.ON and mock_power(x100) == PowerState.ON, limit=4)
+        core.plug_reconnected()
+        core.plug_status(True, 150.3, "init")
+        assert wait_for(lambda: any("its power wasn't cut" in r.getMessage() for r in caplog.records), limit=2)
+        assert not core._quiet() and core._plug_check_until is None and core._doubt_on == ""
+        assert core.state.power == PowerState.ON and core._start_held()  # an "off" still waits as usual
+    finally:
+        core.stop()

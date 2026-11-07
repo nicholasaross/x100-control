@@ -131,7 +131,7 @@ uv pip install --quiet --python "$PREFIX/.venv/bin/python" --reinstall-package x
 rm -rf "$PREFIX/build" "$PREFIX"/*.egg-info
 checks="import serial, x100_bridge"
 [ "$listener" -eq 1 ] && checks="$checks, openwakeword, sherpa_onnx, sounddevice"
-[ "$alexa" -eq 1 ] && checks="$checks, paho.mqtt"
+[ "$bridge" -eq 1 ] && checks="$checks, paho.mqtt"   # the smart plug, and the Alexa link
 "$PREFIX/.venv/bin/python" -c "$checks; print('packages ok')"
 
 if [ "$listener" -eq 1 ]; then

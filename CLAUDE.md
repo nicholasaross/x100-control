@@ -28,7 +28,7 @@ changing anything.
   - The Pi has no clock battery. After a boot its log carries the time it shut down until the
     network corrects the clock, so the first lines of a boot can be days out.
 - **The projector's mains goes through a Shelly Plus Plug UK** (Gen2, stable firmware 2.0.3), since
-  31 October. The bridge doesn't use it yet.
+  31 October. The bridge can read it (`X100_PLUG_MQTT`, below), once Nick's bridge.env has the lines.
   - It's set to switch its output on at start-up (`initial_state`), and on again 2 minutes after
     any off (`auto_on`). Its cloud link and its own setup network are off, and an admin password
     is set.
@@ -61,6 +61,7 @@ changing anything.
 - `x100_bridge/`:
   - `core.py`: `BridgeCore`, which holds state, deferral, polling and all the power rules below.
   - `local_api.py`: the HTTP API.
+  - `plug.py`: reads the plug's MQTT status, and passes it to `BridgeCore`. It never publishes.
   - `main.py`.
 - `x100_listener/`:
   - `listener.py`: a pure state machine.
@@ -163,6 +164,16 @@ the wall.
     power checks, unanswered ones and full readings the bridge made meanwhile.
   - **Once a day (`summary_seconds`), logs what it asked and missed:** `in the last 24 h: … power
     checks (… unanswered), … full readings, … commands, … outages; OFF … h, ON … h`.
+  - **Reads the plug, if `X100_PLUG_MQTT` and `X100_PLUG_PREFIX` are set.** It subscribes to
+    `<prefix>/status/switch:0` and `<prefix>/online`, and only reads.
+    - While the plug's output is off, it sends nothing, and refuses commands saying so. When the
+      output comes back on, it gives the same 300 s quiet as after any cut.
+    - A plug that reconnects to the broker (a live `online true`, not the retained one) may have
+      restarted, which cuts the power. It sends nothing until the plug's next reading, for up to
+      10 s (`plug_check_seconds`). Then it takes it as a cut, unless the projector is drawing 50 W
+      or more (`plug_on_watts`), which means it's on and can't have just been cut.
+    - If the broker can't be reached, or the settings are wrong, it logs that once and carries on
+      as without a plug.
   - **For 120 s after a start (`X100_START_HOLD_SECONDS`):** sends no power command. An "off"
     waits, and a repeated "on" isn't sent.
   - **Never resends "on" by itself.** 2 s after "on" it checks whether volume still answers. If it
@@ -206,7 +217,7 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - **The `test` extra needs Python 3.10 or later,** because amqtt does. A Mac's built-in `python3`
   may be 3.9.
 - **To test on 3.9,** install the package with `pytest` instead of the extra. The MQTT and listener
-  tests then skip: 181 passed and 14 skipped last time.
+  tests then skip: 192 passed and 16 skipped last time.
 - **Other skips need setting up first.** The Alexa schema tests and the real-speech tests skip until
   that's done, as tests/README.md describes.
 
@@ -291,14 +302,17 @@ The code supports Python 3.9 and up, and the Pi runs 3.11. Before a release, run
 - **install.sh leaves a root-owned cache file in the unpacked release folder.** Its package check
   runs Python as root from that folder, which also means the check imports the unpacked copy, not
   the installed one. Until that's fixed, the install step uses `sudo rm`.
-- **The bridge could use the plug, but doesn't yet.** It could read the power to tell on from
-  standby without asking the projector anything, spot a power cut of any length from the plug's
-  uptime, and power-cycle a hang. Any of that needs Nick's agreement and tests.
-  - The cut detection matters more with hourly checks. A cut, or a restart of the plug, between
-    checks goes unseen, so the bridge doesn't doubt "on" afterwards. If the projector then sits in
-    the standby that looks on, a voice "on" gets "ok" and nothing is sent. This happened on 2
-    November: the plug restarted for a settings change, and the fan then ran in standby, at about
-    13 W against 12.
+- **The bridge can read the plug, from the `claude/plug-power-cuts` pull request, once Nick agrees
+  and installs it.** It's meant for after the week of watching. It sees the plug's off and on, and
+  its restarts, so a cut between hourly checks is no longer missed.
+  - Why: on 7 November it hung in standby, and Nick power-cycled it with the plug's button, off for
+    about 30 s. With hourly checks the bridge saw nothing, so an "on" while it booted would have gone
+    straight to it. His "on" came 1.5 to 5 minutes later, and worked. On 2 November a restart of the
+    plug for a settings change went unseen the same way.
+  - Nick's bridge.env needs `X100_PLUG_MQTT=127.0.0.1:1884` and `X100_PLUG_PREFIX=x100-plug` added
+    by hand: install.sh keeps it as it is.
+  - Still possible later, with Nick's agreement and tests: using the plug's watts to tell on from
+    standby without asking the projector anything, and power-cycling a hang.
 - **A crash between 16 and 18 October** happened before the journal was persistent. Nick doesn't
   remember the details, so it can't be placed.
 - **Untested: a serial "on" from the standby that looks on** after a power cut. Until it's known to
