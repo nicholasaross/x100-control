@@ -16,7 +16,7 @@
 #   /opt/x100-control/bridge.env    bridge settings: X100_SERIAL (or X100_HOST), LOCAL_API_*
 #   /opt/x100-control/listener.env  listener settings: BRIDGE_URL, BRIDGE_TOKEN, MIC_DEVICE, ...
 #   /opt/x100-control/config        inputs learnt with `x100ctl learn-inputs` (owned by x100)
-#   /opt/x100-control/models        wake-word and command models (owned by x100)
+#   /opt/x100-control/models        wake-word and command models, and the spoken replies (owned by x100)
 set -euo pipefail
 
 PREFIX=/opt/x100-control
@@ -140,6 +140,14 @@ if [ "$listener" -eq 1 ]; then
   chown -R "$SERVICE_USER:$SERVICE_USER" "$PREFIX/models" "$PREFIX/clips"
   (cd "$PREFIX" && runuser -u "$SERVICE_USER" -- env MODELS_DIR="$PREFIX/models" \
     "$PREFIX/.venv/bin/x100-listener" --download-models)
+
+  step "Spoken replies"
+  # Made once, with a voice fetched the first time (80 MB). A minute or two on a Pi 3.
+  if ! (cd "$PREFIX" && runuser -u "$SERVICE_USER" -- env MODELS_DIR="$PREFIX/models" \
+    "$PREFIX/.venv/bin/x100-listener" --make-replies); then
+    echo "warning: couldn't make the spoken replies, so the listener uses its chimes instead."
+    echo "  Try again later: cd $PREFIX && sudo -u $SERVICE_USER .venv/bin/x100-listener --env-file listener.env --make-replies"
+  fi
 fi
 
 bridge_ready=0 serial_note=""

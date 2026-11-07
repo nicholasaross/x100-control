@@ -7,6 +7,10 @@
     unclear  one low note          heard "Hey Jarvis" but no command after it
     wake     one short blip        heard "Hey Jarvis" (off by default: it would talk over you)
 
+With spoken replies (replies.py), the player is also asked for those by name ("plug_off", say). It
+plays the clip, or if there isn't one, the chime it stands in for: "queued" for the "queued_..."
+replies, and "fail" for the rest.
+
 ``listener.py`` only needs the ``ChimePlayer`` interface, so a remote speaker
 (an ESP32 board, say) can play them instead.
 """
@@ -31,6 +35,18 @@ CHIMES = {
     "wake": [("A5", 0.06)],
 }
 TAIL = 0.15  # keep ignoring the mic this long after a chime ends (room echo)
+
+
+def chime_for(kind: str) -> str:
+    """The chime a spoken reply stands in for, when it has no clip."""
+    if kind in CHIMES:
+        return kind
+    return "queued" if kind.startswith("queued") else "fail"
+
+
+def pick_sound(kind: str, clips: Dict[str, np.ndarray], tones: Dict[str, np.ndarray]) -> np.ndarray:
+    clip = clips.get(kind)
+    return clip if clip is not None else tones[chime_for(kind)]
 
 
 class ChimePlayer(Protocol):
@@ -79,18 +95,24 @@ class SoundDeviceChimes:
         self.name = info["name"]
         self.rate = int(info["default_samplerate"])
         self._tones: Dict[str, np.ndarray] = {k: tone(k, self.rate, volume) for k in CHIMES}
+        self._clips: Dict[str, np.ndarray] = {}
         self._busy_until = 0.0
         self._lock = threading.Lock()
         log.info("chimes on %s", self.name)
 
+    def use_clips(self, clips: Dict[str, np.ndarray]) -> None:
+        """Spoken replies, by name, already at this speaker's sample rate (replies.load_clips)."""
+        self._clips = dict(clips)
+
     def play(self, kind: str) -> None:
+        sound = pick_sound(kind, self._clips, self._tones)
         with self._lock:
-            self._busy_until = time.monotonic() + duration(kind) + TAIL
+            self._busy_until = time.monotonic() + len(sound) / self.rate + TAIL
         try:
             # Its own short-lived stream, so it never fights the mic's input stream.
             stream = self._sd.OutputStream(device=self.device, samplerate=self.rate, channels=1, dtype="float32")
             stream.start()
-            threading.Thread(target=self._write, args=(stream, self._tones[kind]), daemon=True).start()
+            threading.Thread(target=self._write, args=(stream, sound), daemon=True).start()
         except Exception as exc:  # a chime must never take the listener down
             log.warning("couldn't play the %s chime: %s", kind, exc)
 

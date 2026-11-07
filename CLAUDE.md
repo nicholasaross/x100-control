@@ -195,6 +195,17 @@ the wall.
 - **Chimes:** two rising notes for ok, two level notes for queued (accepted, but waiting until the
   projector is ready, such as an "off" in the 2 minutes after a start), two falling notes for fail,
   and one low note when no command followed "Hey Jarvis".
+- **Spoken replies (`replies.py`) stand in for the level and falling notes.** Nick chose the voice on
+  7 November 2026: Piper's semaine voice, speaker 2 ("Obadiah"), 3.5 semitones lower at the same
+  pace, with a little growl and gravel ("gruff"; the "sillier" 6.5 semitones was too much).
+  - The bridge gives each refusal a `reason` ("plug_off", "booting", …: `BridgeError`), and the
+    listener picks the line from that, or from the code when there's no reason.
+  - Clips are made once by `x100-listener --make-replies`, which install.sh runs. It fetches the
+    voice first (80 MB, checksummed, unpacked only inside its own folder). They're named by a hash
+    of the line, voice and effect, so changing any of them makes fresh clips at the next install.
+  - A reply with no clip plays its chime. `REPLIES=chimes` turns the voice off.
+  - Speech peaks at twice `CHIME_VOLUME`, as it sounds quieter than a tone at the same peak. Not yet
+    heard on the Jabra.
 - **On the Pi 3**, the wake word takes about 26 ms per 80 ms frame and the command spotter about
   24 ms.
 - **Keep ONNX intra-op spinning off** (`allow_spinning=0` in `wake.py`). With it on, the listener
