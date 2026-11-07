@@ -1,7 +1,7 @@
 # The bridge, for the Jetson (multi-arch: amd64 / arm64).
 #   docker compose up -d --build                     local-only, the default
 #   EXTRAS=aws in docker-compose.yml                 adds the optional Alexa link (alexa/README.md)
-FROM python:3.12-slim
+FROM python:3.11-slim
 ARG EXTRAS=""
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /src
