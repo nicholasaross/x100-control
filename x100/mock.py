@@ -9,7 +9,8 @@ RS-232: its power query says ON in standby and while starting up, in standby it
 answers only volume and mute besides, while starting up it answers nothing else
 for most of the warm-up, and it doesn't answer "off" when it's already off. After a power cut it
 can hang (``hang_if_asked_while_booting``), and its standby can then look just like on
-(``cold_standby_after_power_up``).
+(``cold_standby_after_power_up``). ``hang_if_asked_after_off`` is a guess, for testing an idea about
+why it hangs in standby.
 
 Run it standalone to rehearse the whole stack before touching the projector::
 
@@ -92,6 +93,11 @@ class MockState:
     # Once, while on, it didn't answer about its input in time (busy, perhaps with its menu open) but still
     # answered about volume and mute: a moment that looks just like standby.
     drop_input_replies: int = 0
+    # A guess, not seen in any trace: that asking it anything but the power query in the first moments of
+    # standby hangs it. In every standby period up to November 2026, hung or not, the bridge did just that (the
+    # poll that saw the standby, and the check after it), and it hung in standby whatever switched it off.
+    hang_if_asked_after_off: float = 0.0
+    off_at: float = 0.0              # when it last went from on to standby
     sources: Dict[int, str] = field(default_factory=lambda: dict(MOCK_SOURCES))
     keys: List[int] = field(default_factory=list)
     log: List[str] = field(default_factory=list)
@@ -125,11 +131,12 @@ class MockState:
             if time.monotonic() - self.started < self.hang_if_off_within:
                 self.hung = True
             self.power = PowerState.COOLING
-            self.until = time.monotonic() + self.cooldown
+            self.off_at = time.monotonic()
+            self.until = self.off_at + self.cooldown
 
     def power_cut(self) -> None:
         """Switched off at the wall: silent until power_restored(), and no longer hung."""
-        self.powered, self.hung, self.power, self.cold = False, False, PowerState.OFF, False
+        self.powered, self.hung, self.power, self.cold, self.off_at = False, False, PowerState.OFF, False, 0.0
 
     def power_restored(self) -> None:
         self.powered, self.restored_at = True, time.monotonic()
@@ -208,6 +215,12 @@ def handle_frame(state: MockState, data: bytes) -> bytes:
             return SILENCE
         state.tick()
         on = state.power == PowerState.ON
+        if (state.hang_if_asked_after_off and state.off_at and state.power in (PowerState.COOLING, PowerState.OFF)
+                and time.monotonic() - state.off_at < state.hang_if_asked_after_off
+                and frame.type == TYPE_READ and len(frame.payload) == 5
+                and (frame.payload[3], frame.payload[4]) != (0x11, 0x00)):
+            state.hung = True  # it answers as usual: the hang shows at the next "on"
+            state.log.append(f"R {frame.payload[3]:02X} {frame.payload[4]:02X} (just gone to standby)")
         if (state.drop_input_replies > 0 and frame.type == TYPE_READ and len(frame.payload) == 5
                 and (frame.payload[3], frame.payload[4]) == (0x13, 0x01)):
             state.drop_input_replies -= 1

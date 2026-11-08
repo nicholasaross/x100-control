@@ -1170,3 +1170,267 @@ def test_a_plug_that_reconnects_while_the_projector_is_on_didnt_cut_it(x100, cap
         assert core.state.power == PowerState.ON and core._start_held()  # an "off" still waits as usual
     finally:
         core.stop()
+
+
+# ---------------------------------------------------------------------------- on or standby, by the plug's watts
+
+
+WATTS = dict(POWER_CUT, power_check_seconds=3600, start_hold_seconds=1.0, plug_mqtt="test:1883",
+             plug_prefix="test-plug", plug_state=True, plug_follow_seconds=2.0, plug_stale_seconds=1.0,
+             plug_check_seconds=1.0)
+OFF = [{"op": "power", "value": "OFF"}]
+
+
+class FakePlug:
+    """The plug on the simulator's mains, sending what the projector draws, as the real one does over MQTT
+    (here every 50 ms). On and standby are as measured on 2 November 2026; starting and stopping are guesses,
+    in between the two thresholds."""
+
+    def __init__(self, srv, core, every=0.05):
+        self.srv, self.core, self.every = srv, core, every
+        self.draw = {PowerState.OFF: 12.1, PowerState.COOLING: 30.0, PowerState.WARMING: 40.0, PowerState.ON: 151.7}
+        self.sending = threading.Event()
+        self.sending.set()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=2)
+
+    def _run(self):
+        while not self._stop.wait(self.every):
+            if self.sending.is_set():
+                with self.srv.state.lock:
+                    self.srv.state.tick()
+                    powered, power = self.srv.state.powered, self.srv.state.power
+                self.core.plug_status(powered, self.draw[power] if powered else 0.0, "")
+
+
+def watts_bridge(srv, expect=PowerState.OFF, **overrides):
+    """A bridge going by the plug's watts. It reads the projector once as it starts, as it does without the plug."""
+    core = bridge(srv, expect, **dict(WATTS, **overrides))
+    plug = FakePlug(srv, core)
+    assert wait_for(lambda: core._by_watts and core.state.power == expect, limit=2)
+    return core, plug
+
+
+def said(caplog):
+    return [r.getMessage() for r in caplog.records]
+
+
+def test_asked_things_just_after_it_goes_off_the_simulator_hangs(x100):
+    """The idea under test (MockState.hang_if_asked_after_off), with the bridge as it is without the plug's watts:
+    the reading that sees the standby, and the check after it, come in the first moments of it."""
+    x100.state.hang_if_asked_after_off = 3.0
+    core = bridge(x100, **dict(POWER_CUT, power_check_seconds=3600, start_hold_seconds=0.5))
+    try:
+        started_and_settled(core, x100)
+        with x100.state.lock:
+            x100.state.turn_off()  # its remote
+        assert wait_for(lambda: core.state.power == PowerState.OFF, limit=3)
+        assert x100.state.hung and any("(just gone to standby)" in e for e in x100.state.log)
+        assert wait_for(lambda: mock_power(x100) == PowerState.OFF)
+        result = core.submit_and_wait(ON)
+        assert not result["ok"] and result["reason"] == "not_started"
+    finally:
+        core.stop()
+
+
+def test_going_by_the_plugs_watts_it_asks_nothing_as_it_goes_off(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    x100.state.hang_if_asked_after_off = 3.0
+    core, plug = watts_bridge(x100)
+    try:
+        started_and_settled(core, x100)
+        heard = len(x100.state.log)
+        with x100.state.lock:
+            x100.state.turn_off()  # its remote
+        assert wait_for(lambda: core.state.power == PowerState.OFF, limit=3)
+        assert x100.state.log[heard:] == [] and not x100.state.hung
+        changes = power_changes(caplog)
+        assert "projector: ON -> COOLING (the plug: 30 W)" in changes
+        assert changes[-1] == "projector: COOLING -> OFF (the plug: 12 W)"
+        assert core.submit_and_wait(ON)["ok"]
+        assert x100.state.log[heard:] == ["W 11 00 00", "R 14 03 (silent)"]  # "on", and the check that it started
+        assert wait_for(lambda: x100.state.power == PowerState.ON, limit=4)
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_going_by_watts_the_projector_hears_only_what_to_do(x100):
+    core, plug = watts_bridge(x100)
+    try:
+        heard = len(x100.state.log)
+        started_and_settled(core, x100)
+        time.sleep(0.5)  # well past the start hold
+        assert core.submit_and_wait(OFF)["ok"] and core.state.power == PowerState.COOLING
+        queued = core.submit_and_wait(ON)
+        assert queued["ok"] and queued["deferred"]  # until its draw shows standby, and its cool-down is over
+        assert wait_for(lambda: x100.state.power in (PowerState.WARMING, PowerState.ON), limit=4)
+        assert wait_for(lambda: core.state.power == PowerState.ON, limit=4)
+        time.sleep(0.5)
+        assert x100.state.log[heard:] == ["W 11 00 00", "R 14 03 (silent)", "W 11 01 00",
+                                          "W 11 00 00", "R 14 03 (silent)"]
+        assert core._today["full readings"] == 1 and core._today["power checks"] == 0  # the one as it started
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_going_by_watts_a_start_by_its_remote_is_seen_and_holds_an_off(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core, plug = watts_bridge(x100)
+    try:
+        heard = len(x100.state.log)
+        with x100.state.lock:
+            x100.state.turn_on()  # its remote
+        assert wait_for(lambda: core.state.power == PowerState.WARMING, limit=2)
+        assert core._start_held()
+        assert core.submit_and_wait(ON)["ok"]  # it's starting: no second "on"
+        off = core.submit_and_wait(OFF)
+        assert off["ok"] and off["deferred"]
+        assert wait_for(lambda: core.state.power == PowerState.ON, limit=3)
+        assert x100.state.log[heard:] == []  # nothing yet: the "off" waits out the hold
+        assert wait_for(lambda: x100.state.log[heard:] == ["W 11 01 00"], limit=4)
+        assert any(m.startswith("the projector is drawing more than in standby, and the bridge didn't start it")
+                   for m in said(caplog))
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_going_by_watts_a_hang_still_gets_an_answer_and_says_nothing_was_asked(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core, plug = watts_bridge(x100)
+    try:
+        started_and_settled(core, x100)
+        with x100.state.lock:
+            x100.state.turn_off()  # its remote
+        assert wait_for(lambda: core.state.power == PowerState.OFF, limit=3)
+        time.sleep(0.3)
+        with x100.state.lock:
+            x100.state.hung = True  # say it hangs in standby all the same
+        result = core.submit_and_wait(ON)
+        assert not result["ok"] and result["reason"] == "not_started"
+        hang = next(m for m in said(caplog) if m.startswith("the projector acknowledged power on but hasn't started"))
+        assert "(its remote, or the projector itself, switched it off)" in hang
+        assert re.search(r"made 0 power checks \(0 unanswered\), 0 full readings, \d+ readings from the plug", hang)
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_going_by_watts_a_dim_moment_isnt_taken_for_standby(x100):
+    core, plug = watts_bridge(x100)
+    try:
+        started_and_settled(core, x100)
+        heard = len(x100.state.log)
+        plug.draw[PowerState.ON] = 40.0  # a dark scene, say
+        assert wait_for(lambda: core.state.power == PowerState.COOLING, limit=2)  # it might be going off...
+        assert wait_for(lambda: core.state.power == PowerState.ON, limit=3)  # ...but it stays in between
+        assert x100.state.log[heard:] == []
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_going_by_watts_an_off_that_doesnt_take_is_noticed(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core, plug = watts_bridge(x100)
+    try:
+        started_and_settled(core, x100)
+        time.sleep(0.5)  # past the start hold
+        plug.draw = dict.fromkeys(plug.draw, 151.7)  # whatever it says, it's drawing full power
+        assert core.submit_and_wait(OFF)["ok"] and core.state.power == PowerState.COOLING
+        assert wait_for(lambda: core.state.power == PowerState.ON, limit=3)  # after plug_follow_seconds
+        assert any(m.endswith("after the bridge's 'off': it didn't go off)") for m in power_changes(caplog))
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_without_fresh_readings_from_the_plug_it_asks_the_projector_as_before(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core, plug = watts_bridge(x100)
+    try:
+        heard = len(x100.state.log)
+        plug.sending.clear()
+        assert wait_for(lambda: not core._by_watts, limit=3)
+        assert wait_for(lambda: x100.state.log[heard:] == ["R 11 00"], limit=2)  # a power check, as in standby
+        plug.sending.set()
+        assert wait_for(lambda: core._by_watts, limit=2)
+        assert any(m.startswith("no reading from the projector's plug for ") for m in said(caplog))
+        assert sum(m.startswith("telling on from standby by what the projector draws") for m in said(caplog)) == 2
+        assert core.submit_and_wait(ON)["ok"]
+        assert x100.state.log[heard + 1] == "W 11 00 00"  # by its watts again: nothing asked first
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_a_bridge_that_hears_nothing_from_the_plug_carries_on_as_without_it(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core = bridge(x100, **dict(WATTS, power_check_seconds=0.2))
+    try:
+        heard = len(x100.state.log)  # its first reading
+        time.sleep(0.3)
+        assert x100.state.log[heard:] == []  # waiting for the plug's first reading
+        assert wait_for(lambda: any("since the bridge started" in m for m in said(caplog)), limit=2)
+        assert wait_for(lambda: len(x100.state.log) > heard, limit=2)  # asking the projector itself
+    finally:
+        core.stop()
+
+
+def test_going_by_watts_after_a_plug_cycle_it_is_left_alone_then_read_once(x100):
+    booting_x100(x100)
+    core, plug = watts_bridge(x100)
+    try:
+        readings = core._today["full readings"]
+        with x100.state.lock:
+            x100.state.power_cut()  # the plug's button
+        assert wait_for(lambda: core._plug_output is False, limit=2)
+        time.sleep(0.3)
+        with x100.state.lock:
+            x100.state.power_restored()
+        assert wait_for(core._quiet, limit=2)
+        assert core.submit_and_wait(ON)["reason"] == "booting"
+        assert wait_for(lambda: not core._quiet() and core._by_watts and not core._full_reading_due, limit=4)
+        time.sleep(0.5)
+        assert core._today["full readings"] == readings + 1  # once, to tell its standby, and then nothing
+        assert not x100.state.hung and core.submit_and_wait(ON)["ok"]
+        assert wait_for(lambda: x100.state.power == PowerState.ON, limit=4)
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_going_by_watts_after_a_cut_a_standby_that_looks_on_still_gets_no_on(x100, caplog):
+    """The plug's watts can't tell one standby from another, and whether the standby that answers like on takes
+    a serial "on" isn't known. So after a cut the bridge still reads it once, and sends no "on" from that one."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    x100.state.cold_standby_after_power_up = True
+    core, plug = watts_bridge(x100)
+    try:
+        with x100.state.lock:
+            x100.state.power_cut()
+        assert wait_for(lambda: core._plug_output is False, limit=2)
+        with x100.state.lock:
+            x100.state.power_restored()
+        assert wait_for(core._quiet, limit=2)
+        cold = "projector: ON -> OFF (the plug: 12 W: the standby that answers as if it were on, after a power cut)"
+        assert wait_for(lambda: power_changes(caplog)[-1:] == [cold], limit=5)  # read once, then its watts
+        assert core.state.power == PowerState.OFF and core._doubt_on == "a power cut"
+        heard = len(x100.state.log)
+        refused = core.submit_and_wait(ON)
+        assert not refused["ok"] and refused["reason"] == "looks_on"
+        assert "plug shows it in standby" in refused["message"] and "remote" in refused["message"]
+        assert x100.state.log[heard:] == []
+        with x100.state.lock:
+            x100.state.turn_on()  # its remote, this once
+        assert wait_for(lambda: core._doubt_on == "" and core.state.power == PowerState.WARMING, limit=2)
+    finally:
+        plug.stop()
+        core.stop()

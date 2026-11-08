@@ -125,7 +125,17 @@ def check_config(cfg: Config) -> list:
             log.info("CA_FILE %s not found; using the system trust store", cfg.ca_file)
     if not cfg.aws_enabled and not cfg.local_api_enabled:
         problems.append("nothing to do: LOCAL_API_BIND is off and AWS_IOT_ENDPOINT isn't set")
+    if cfg.plug_state and not 0 <= cfg.plug_standby_watts < cfg.plug_on_watts:
+        problems.append(f"X100_PLUG_STANDBY_WATTS ({cfg.plug_standby_watts:g}) must be less than X100_PLUG_ON_WATTS "
+                        f"({cfg.plug_on_watts:g})")
     return problems
+
+
+def check_plug_state(cfg: Config) -> None:
+    """X100_PLUG_STATE needs the plug: without it, the bridge carries on as usual, and says so."""
+    if cfg.plug_state and not cfg.plug_enabled:
+        log.error("X100_PLUG_STATE is set, but X100_PLUG_MQTT isn't: carrying on without the plug's watts")
+        cfg.plug_state = False
 
 
 def _get_json(url: str, token: str = "", timeout: float = 3.0) -> Dict[str, Any]:
@@ -192,6 +202,9 @@ def run_check(cfg: Config, core: BridgeCore, api: Optional[LocalApi], link: Opti
             time.sleep(1.0)  # for the broker's note of whether the plug is connected
             state = {True: "the plug is connected", False: "but the plug isn't connected to it"}
             print(f"  reading it, {state.get(plug.plug_online, 'and the plug has said nothing yet')}")
+            if cfg.plug_state:
+                print(f"  telling on from standby by its watts (X100_PLUG_STATE): standby at "
+                      f"{cfg.plug_standby_watts:g} W or less, on at {cfg.plug_on_watts:g} W or more")
         else:
             ok = False
             print("  can't reach the broker -- check X100_PLUG_MQTT")
@@ -235,6 +248,7 @@ def main(argv=None) -> int:
     except ValueError as exc:
         log.error("bad setting: %s", exc)
         return 2
+    check_plug_state(cfg)
     problems = check_config(cfg)
     if problems:
         for p in problems:

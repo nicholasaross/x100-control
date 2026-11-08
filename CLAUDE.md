@@ -108,9 +108,14 @@ the wall.
   - But from 18 to 27 October, with clean power and every change logged, it hung in 4 of 9 standby
     periods. The "off"s before them were from the bridge after 91 minutes on, and from the remote
     (or the projector itself) after 2 hours on. Other standby periods, after similar "off"s, were fine.
-  - So it's either the projector by itself, or something the bridge does in standby: build
-    e776ca5b and later ask "power?" every 2 s, about 43,000 times a day. The open items have the
-    week of watching that tells them apart.
+  - So it was either the projector by itself, or something the bridge does in standby: build
+    e776ca5b and later ask "power?" every 2 s, about 43,000 times a day.
+  - From 2 to 8 November, with that check once an hour and the CEC traffic cut, it still hung in 2
+    of 7 standby periods. Both followed a remote "off" (8 November's at 13:05 is confirmed), and the
+    second came after only 3 checks in 2.6 h. So the standby checks aren't the cause.
+  - What every standby period has still had, hung or not: the bridge asks everything in the first
+    minute after the "off", in the poll that sees the standby and the check 15 s later. Whether
+    that matters isn't known. The plug's watts can tell standby without asking (below).
 - **It misses a reply to the power query now and then:** about once a day at one check every 2 s,
   from 21 October. On 24 October it stayed on throughout one, so it wasn't a power cut.
 - **It draws about 150 W when on, and about 12 W in standby,** whichever kind of standby (measured
@@ -174,7 +179,23 @@ the wall.
       or more (`plug_on_watts`), which means it's on and can't have just been cut.
     - If the broker can't be reached, or the settings are wrong, it logs that once and carries on
       as without a plug.
-  - **For 120 s after a start (`X100_START_HOLD_SECONDS`):** sends no power command. An "off"
+  - **Can tell on from standby by the plug's watts, with `X100_PLUG_STATE=true`.** It's an
+    experiment, off by default. While the plug's readings are fresh, the bridge asks the projector
+    nothing except what a command needs: no polls, no power checks, and no reading before "on".
+    - The bands: standby at 25 W or less (`X100_PLUG_STANDBY_WATTS`), on at 50 W or more
+      (`X100_PLUG_ON_WATTS`). In between, it's starting up or going off, whichever way it was
+      heading. In between for longer than 90 s (`plug_follow_seconds`), it's on (a dim picture, say),
+      unless the bridge switched it off. The real draw while starting and stopping isn't known yet.
+    - After "on", it still checks once that volume has stopped answering, so a hang gets an answer
+      at once.
+    - It still takes one full reading when it starts and after the quiet that follows a cut. The
+      watts can't tell the standby that answers like on from an ordinary one, and whether a serial
+      "on" is safe from that one isn't known. If the reading shows it, "on" is refused with
+      `looks_on` until the projector has been started with its remote.
+    - A start by its remote is seen from the watts, and starts the 120 s hold.
+    - With no reading for 180 s (`plug_stale_seconds`; the plug sends one about once a minute), it
+      asks the projector as without the plug, and logs that. It logs again when the readings are back.
+    - The daily line and the hang line count the readings from the plug. (`X100_START_HOLD_SECONDS`):** sends no power command. An "off"
     waits, and a repeated "on" isn't sent.
   - **Never resends "on" by itself.** 2 s after "on" it checks whether volume still answers. If it
     does, the projector is still in standby, and the bridge reports that it hasn't started.
@@ -186,7 +207,8 @@ the wall.
   - Plain `trace` asks everything, which hangs it while it boots.
 - **`x100/mock.py` reproduces all of this in quirks mode,** through `hang_if_asked_while_booting`,
   `hang_if_off_within`, `cold_standby_after_power_up`, `power_cut()`, `power_restored()` and
-  `boot_seconds`. Any change to power
+  `boot_seconds`. `hang_if_asked_after_off` is a guess, not from any trace: the idea the watts are
+  there to test. Any change to power
   handling needs a test in `tests/test_power_quirks.py` that first shows the hazard in the
   simulator, then shows it prevented.
 
@@ -291,9 +313,11 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
 - The old private repo, `nicholasaross/x100-control-private`, is archived. Don't push to it. The
   merge messages for "pull request #1" and "#2" in `main`'s early history refer to PRs there.
 
-## Open items (as of 2026-11-02)
+## Open items (as of 2026-11-08)
 
-- **A week of watching, from 17:06 on 2 November to about 9 November.** In effect throughout:
+- **A week of watching, from 17:06 on 2 November to about 9 November.** So far it has hung in 2 of 7
+  standby periods (7 November at 20:20, 8 November at 15:40), so the hourly checks and the CEC
+  changes didn't stop it. In effect throughout:
   - build bbc37ab4, installed at 17:48
   - `X100_POWER_CHECK_SECONDS=3600` in bridge.env, so in standby the bridge asks "power?" about
     once an hour, not every 2 s
@@ -316,8 +340,9 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
 - **install.sh leaves a root-owned cache file in the unpacked release folder.** Its package check
   runs Python as root from that folder, which also means the check imports the unpacked copy, not
   the installed one. Until that's fixed, the install step uses `sudo rm`.
-- **The bridge can read the plug, from the `claude/plug-power-cuts` pull request, once Nick agrees
-  and installs it.** It's meant for after the week of watching. It sees the plug's off and on, and
+- **Merged but not installed:** reading the plug (pull request 11) and the spoken replies (13). They're
+  meant for after the week of watching, with Nick's OK.
+- **The bridge can read the plug, once Nick installs it.** It sees the plug's off and on, and
   its restarts, so a cut between hourly checks is no longer missed.
   - Why: on 7 November it hung in standby, and Nick power-cycled it with the plug's button, off for
     about 30 s. With hourly checks the bridge saw nothing, so an "on" while it booted would have gone
@@ -325,8 +350,13 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
     plug for a settings change went unseen the same way.
   - Nick's bridge.env needs `X100_PLUG_MQTT=127.0.0.1:1884` and `X100_PLUG_PREFIX=x100-plug` added
     by hand: install.sh keeps it as it is.
-  - Still possible later, with Nick's agreement and tests: using the plug's watts to tell on from
-    standby without asking the projector anything, and power-cycling a hang.
+  - Still possible later, with Nick's agreement and tests: power-cycling a hang.
+- **Telling on from standby by the plug's watts (`X100_PLUG_STATE`), from the `claude/plug-watts-state`
+  pull request.** It tests the idea that the questions just after an "off" hang it: a week with it
+  on, and still hanging, would point at the projector itself.
+  - Before turning it on, watch the plug's readings across a real "off" and "on" (`mosquitto_sub`,
+    above, without `-C 1`), to check the 25 W and 50 W bands against how its draw rises and falls.
+  - Needs the plug lines in bridge.env too, and `X100_PLUG_STATE=true`.
 - **A crash between 16 and 18 October** happened before the journal was persistent. Nick doesn't
   remember the details, so it can't be placed.
 - **Untested: a serial "on" from the standby that looks on** after a power cut. Until it's known to
