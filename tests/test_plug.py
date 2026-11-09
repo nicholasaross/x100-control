@@ -15,7 +15,7 @@ import pytest
 from x100.mock import MockServer
 from x100.protocol import PowerState
 from x100_bridge.core import BridgeCore, Config
-from x100_bridge.main import make_plug_watcher
+from x100_bridge.main import check_config, check_plug_state, make_plug_watcher
 from x100_bridge.plug import PlugStatus, PlugWatcher, parse_broker, parse_switch_status
 
 from .test_bridge import make_inputs
@@ -67,6 +67,23 @@ def test_the_settings(monkeypatch):
     monkeypatch.setenv("X100_PLUG_PREFIX", " my-plug/ ")
     cfg = Config.from_env()
     assert cfg.plug_enabled and cfg.plug_mqtt == "127.0.0.1:1884" and cfg.plug_prefix == "my-plug"
+
+
+def test_the_settings_for_telling_on_from_standby_by_its_watts(monkeypatch, caplog):
+    cfg = Config()
+    assert not cfg.plug_state and (cfg.plug_standby_watts, cfg.plug_on_watts) == (25.0, 50.0)
+    monkeypatch.setenv("X100_PLUG_STATE", "true")
+    monkeypatch.setenv("X100_PLUG_STANDBY_WATTS", "30")
+    monkeypatch.setenv("X100_PLUG_ON_WATTS", "80")
+    cfg = Config.from_env()
+    assert cfg.plug_state and (cfg.plug_standby_watts, cfg.plug_on_watts) == (30.0, 80.0)
+    check_plug_state(cfg)  # no X100_PLUG_MQTT: it carries on without the watts
+    assert not cfg.plug_state and "X100_PLUG_STATE is set, but X100_PLUG_MQTT isn't" in caplog.text
+    monkeypatch.setenv("X100_PLUG_MQTT", "127.0.0.1:1884")
+    monkeypatch.setenv("X100_PLUG_ON_WATTS", "20")
+    cfg = Config.from_env()
+    check_plug_state(cfg)
+    assert cfg.plug_state and any("must be less than X100_PLUG_ON_WATTS" in p for p in check_config(cfg))
 
 
 def test_bad_plug_settings_dont_stop_the_bridge(caplog):

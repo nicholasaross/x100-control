@@ -275,6 +275,12 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
     up to 10 s, it sends nothing, then takes it as a cut unless the projector is drawing full power.
     It only reads the plug, and never switches it. `X100_PLUG_MQTT` and `X100_PLUG_PREFIX` in
     `bridge.env` turn this on (the example file says how), and `x100-bridge --check` tests them;
+  * with that plug and `X100_PLUG_STATE=true`, an experiment, tells on from standby by what the
+    projector draws: standby at 25 W or less, on at 50 W or more, and starting or stopping in between.
+    Then it asks the projector nothing except what a command needs: no checks in standby, no questions
+    as it goes off, and none before "on". It still checks once after "on" that the projector started.
+    It reads it once when the bridge starts and after a power cut, as the watts can't tell the standby
+    that answers like on. With no reading from the plug for 3 minutes, it asks the projector as usual;
   * sends no power command for 2 minutes after the projector starts (by voice, remote or its button):
     an "off" waits, and a repeated "on" isn't sent;
   * never sends "on" by itself, and says "ok" to an "on" only once the projector has visibly started

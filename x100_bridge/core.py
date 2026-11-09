@@ -133,6 +133,20 @@ class Config:
     plug_prefix: str = ""           # the plug's MQTT prefix
     plug_check_seconds: float = 10.0
     plug_on_watts: float = 50.0     # an X100-4K draws about 150 W on, and about 12 W in standby
+    # Telling on from standby by the plug's watts (plug_state, X100_PLUG_STATE; the X100-4K's rules then apply
+    # from the start). While the plug's readings are fresh, the bridge asks the projector nothing except what a
+    # command needs: no polls, no power checks, and no reading before "on". It still checks once, just after
+    # "on", that the projector has stopped answering about its volume, so that a hang gets an answer at once.
+    # At or below plug_standby_watts it's in standby, at plug_on_watts or more it's on, and in between it's
+    # starting up or going off, whichever way it was heading. In between for longer than plug_follow_seconds,
+    # it's on (a dim picture, say), unless the bridge switched it off. The plug sends a reading about once a
+    # minute and on any change: with none for plug_stale_seconds, the bridge asks the projector as usual until
+    # they're back. The idea: in every standby period so far, hung or not, the bridge asked it everything just
+    # after it went off (the poll that saw the standby, and the check after it). Whether that matters isn't known.
+    plug_state: bool = False
+    plug_standby_watts: float = 25.0
+    plug_follow_seconds: float = 90.0
+    plug_stale_seconds: float = 180.0
     warmup_seconds: float = 90.0
     cooldown_seconds: float = 5.0
     settle_seconds: float = 15.0
@@ -199,6 +213,9 @@ class Config:
             x100_quirks=_env_bool("X100_QUIRKS", False),
             plug_mqtt=e("X100_PLUG_MQTT", ""),
             plug_prefix=e("X100_PLUG_PREFIX", "").strip().strip("/"),
+            plug_state=_env_bool("X100_PLUG_STATE", False),
+            plug_standby_watts=_env_float("X100_PLUG_STANDBY_WATTS", 25.0),
+            plug_on_watts=_env_float("X100_PLUG_ON_WATTS", 50.0),
             scenes=parse_scenes(e("X100_SCENES", "")),
             shadow_topic_prefix=e("SHADOW_TOPIC_PREFIX", "$aws/things"),
             local_api_bind=e("LOCAL_API_BIND", "127.0.0.1:8661"),
@@ -296,7 +313,7 @@ class BridgeCore:
         self._waiters: Dict[str, _Waiter] = {}
         self._waiters_lock = threading.Lock()
         # For projectors whose power query says "on" in standby too (see Projector.power_reading):
-        self._power_query_lies = cfg.x100_quirks
+        self._power_query_lies = cfg.x100_quirks or cfg.plug_state
         self._sent_on: Optional[float] = None   # when we last switched it on / off (monotonic)
         self._sent_off: Optional[float] = None
         self._confirmed_at = 0.0                # when a reading last confirmed the power state
@@ -330,6 +347,13 @@ class BridgeCore:
         self._plug_news: "queue.Queue[tuple]" = queue.Queue()
         self._plug_output: Optional[bool] = None
         self._plug_check_until: Optional[float] = None
+        # With plug_state: its latest watts, and when, and whether the bridge is going by them (see Config).
+        self._plug_watts: Optional[float] = None
+        self._plug_read_at: Optional[float] = None
+        self._plug_band = ""                    # "standby", "between" or "on", as last acted on
+        self._by_watts = False
+        self._watts_wait_from: Optional[float] = None  # when the bridge started waiting for the plug's first reading
+        self._watts_said_missing = False
 
     # ------------------------------------------------------------------ intake
     def submit(self, payload: Any) -> None:
@@ -373,7 +397,7 @@ class BridgeCore:
     def plug_status(self, output: bool, watts: Optional[float] = None, source: str = "") -> None:
         """Called from the plug's MQTT thread with each reading: whether its output is on, the watts the
         projector draws, and what last switched it ("button", "init" for its start-up, ...)."""
-        self._plug_news.put(("status", output, watts, source))
+        self._plug_news.put(("status", output, watts, source, time.monotonic()))
 
     def plug_reconnected(self) -> None:
         """Called from the plug's MQTT thread when the plug reconnects to its broker: it may have restarted."""
@@ -382,7 +406,14 @@ class BridgeCore:
     # ------------------------------------------------------------------ loop
     def start(self) -> None:
         if self._power_query_lies:
-            self._say_quirky("X100_QUIRKS is set")
+            self._say_quirky("X100_QUIRKS is set" if self.cfg.x100_quirks else "X100_PLUG_STATE is set")
+        if self.cfg.plug_state:
+            self._watts_wait_from = time.monotonic()
+            # One reading first, as without the plug: its watts can't tell the standby that answers like on.
+            self._full_reading_due = True
+            log.info("X100_PLUG_STATE is set: while the plug's readings are fresh, telling on from standby by what "
+                     "the projector draws (standby at %g W or less, on at %g W or more), and asking it nothing but "
+                     "what a command needs", self.cfg.plug_standby_watts, self.cfg.plug_on_watts)
         self._doubt_on = "the bridge started"
         up = self._uptime() if self._uptime is not None else None
         if up is not None and up < self.cfg.power_up_quiet_seconds:
@@ -473,19 +504,22 @@ class BridgeCore:
         # Answer first. The state in the ack already reflects the write (_apply
         # records it), and reading everything back costs several round trips.
         self._ack(cmd_id, error, deferred=deferred)
-        if error is None and not deferred and not self.cfg.one_way:
+        if error is None and not deferred and not self.cfg.one_way and not self._by_watts:
             self._refresh_quietly()
             self._publish_state()
 
     def _current_power(self) -> PowerState:
         if self.cfg.one_way:
             return self._optimistic_power()
+        if self._watch_watts() and not self._full_reading_due:
+            return self._power_from_watts()  # not a word to the projector
         if self._in_cooldown():
             return self.state.power  # nothing a reading could add: it already looks like standby
         return self._settle_power(self._read_power().state)
 
     def _read_power(self) -> PowerReading:
         self._count("full readings")
+        self._full_reading_due = False  # whatever asked for this one, it's the reading that was due
         try:
             if self._confirm_standby_at is None:
                 reading = self.proj.power_reading()
@@ -618,6 +652,8 @@ class BridgeCore:
         text = f"{checks} power checks ({unanswered} unanswered), {counts['full readings']} full readings"
         if counts["outage probes"]:
             text += f", {counts['outage probes']} probes while it wasn't answering"
+        if counts["plug readings"]:
+            text += f", {counts['plug readings']} readings from the plug"
         return text
 
     def _since_off_text(self) -> str:
@@ -666,7 +702,7 @@ class BridgeCore:
     def _believed_off(self) -> bool:
         """Off by a recent reading: an "on" can go straight out without asking first."""
         s = self.state
-        return (not self.cfg.one_way and s.connected and s.power == PowerState.OFF
+        return (not self.cfg.one_way and not self._by_watts and s.connected and s.power == PowerState.OFF
                 and time.monotonic() - self._confirmed_at < self.cfg.poll_interval + 5)
 
     def _optimistic_power(self) -> PowerState:
@@ -747,6 +783,7 @@ class BridgeCore:
                     return False  # it's starting up
                 if power == PowerState.COOLING:
                     return self._defer(op, PowerState.OFF, cmd_id)
+                self._check_not_cold(power)
                 self.proj.power_on()
                 self._set_power(PowerState.WARMING, "the bridge sent 'on'")
                 self._sent_on, self._sent_off, self._start_confirmed = time.monotonic(), None, False
@@ -794,12 +831,22 @@ class BridgeCore:
 
     def _check_not_cold(self, power: PowerState) -> None:
         """After a power cut, the X100-4K's standby can answer just like on (see _doubt_on): until a reading
-        has shown it in standby or starting, "on" isn't believed, and nothing is sent that would need it on."""
-        if self._power_query_lies and self._doubt_on and power == PowerState.ON:
+        has shown it in standby or starting, "on" isn't believed, and nothing is sent that would need it on.
+        Going by its plug's watts, which can't tell one standby from another, the bridge sends no "on" from
+        standby then either: whether that standby takes a serial "on" safely isn't known."""
+        if not (self._power_query_lies and self._doubt_on):
+            return
+        if power == PowerState.ON:
             raise BridgeError("NOT_IN_OPERATION", "the projector looks on, but after a power cut its standby can "
                               "look just the same, and it hasn't been seen in standby or starting since "
                               f"{self._doubt_on}, so the bridge has sent nothing. If it isn't on, start it with "
                               "its remote this once: after that the bridge can tell again", "looks_on")
+        if power == PowerState.OFF and self._by_watts:
+            raise BridgeError("NOT_IN_OPERATION", "the projector's plug shows it in standby, but it answers as if "
+                              "it were on, as its standby can after a power cut, and it hasn't been seen in an "
+                              f"ordinary standby or starting since {self._doubt_on}. Whether it takes the bridge's "
+                              "'on' from there isn't known, so the bridge has sent nothing. Start it with its remote "
+                              "this once: after that the bridge can tell again", "looks_on")
 
     @staticmethod
     def _validate(kind: str, value: Any) -> None:
@@ -901,6 +948,10 @@ class BridgeCore:
             self._next_poll = self._quiet_until  # it has only just got power back: not a word
         elif self._link_down():
             self._probe_link()
+        elif (self._watch_watts() or self._awaiting_watts()) and not self._full_reading_due:
+            self._next_poll = time.monotonic() + 1.0  # not a word to the projector: the plug tells
+            if self._by_watts:
+                self._power_from_watts()  # for what time alone changes, as when its cool-down is over
         elif self._checking_power() and not self._full_reading_due and (
                 self._in_standby() or time.monotonic() < self._next_full_poll):
             self._check_power()
@@ -1041,11 +1092,13 @@ class BridgeCore:
         return self._plug_output is False or self._plug_check_until is not None
 
     def _take_plug_news(self) -> None:
+        news_came = False
         while True:
             try:
                 news = self._plug_news.get_nowait()
             except queue.Empty:
                 break
+            news_came = True
             if news[0] == "reconnected":
                 self._plug_reconnected()
             else:
@@ -1053,6 +1106,9 @@ class BridgeCore:
         if self._plug_check_until is not None and time.monotonic() >= self._plug_check_until:
             self._plug_check_until = None
             self._plug_restarted(f"there was no reading from it within {self.cfg.plug_check_seconds:.0f} s")
+        if news_came and self._watch_watts() and not (self._quiet() or self._plug_holding() or self._link_down()
+                                                      or self._full_reading_due):
+            self._power_from_watts()
 
     def _plug_reconnected(self) -> None:
         if self._plug_output is False:
@@ -1061,8 +1117,13 @@ class BridgeCore:
         log.warning("the projector's plug has reconnected, and may have restarted, which cuts the projector's "
                     "power: sending the projector nothing until the plug says what it's drawing")
 
-    def _plug_says(self, output: bool, watts: Optional[float], source: str) -> None:
+    def _plug_says(self, output: bool, watts: Optional[float], source: str, at: Optional[float] = None) -> None:
+        """``at``: when the reading arrived, as the bridge may have been busy with a command meanwhile."""
         was, self._plug_output = self._plug_output, output
+        if watts is not None:
+            self._plug_watts = watts if output else 0.0
+            self._plug_read_at = at if at is not None else time.monotonic()
+            self._count("plug readings")
         by = f" ({source})" if source else ""
         if not output:
             if was is not False:
@@ -1095,6 +1156,98 @@ class BridgeCore:
                         "the plug restarted, perhaps, which cuts its power")
         log.warning("taking the plug's reconnection for a restart, which cuts the projector's power (%s): leaving "
                     "the projector alone until %s, as questions while it boots can hang it", why, self._quiet_end())
+
+    # ------------------------------------------------------------------ on or standby, by the plug's watts
+    def _watts_fresh(self) -> bool:
+        return self._plug_read_at is not None and time.monotonic() - self._plug_read_at < self.cfg.plug_stale_seconds
+
+    def _awaiting_watts(self) -> bool:
+        """Just started, with plug_state: the plug sends a reading about once a minute, so wait for one."""
+        return (self.cfg.plug_state and self._plug_read_at is None and self._watts_wait_from is not None
+                and time.monotonic() - self._watts_wait_from < self.cfg.plug_stale_seconds)
+
+    def _watch_watts(self) -> bool:
+        """Whether the bridge goes by the plug's watts now (see Config), saying so in the log when that changes."""
+        if not self.cfg.plug_state:
+            return False
+        fresh = self._watts_fresh()
+        if fresh != self._by_watts:
+            self._by_watts = fresh
+            if fresh:
+                self._confirm_standby_at = None
+                log.info("telling on from standby by what the projector draws (%.0f W now), and asking it nothing "
+                         "but what a command needs", self._plug_watts or 0.0)
+            else:
+                log.warning("no reading from the projector's plug for %.0f s: asking the projector itself again, as "
+                            "without the plug, until its readings are back", self.cfg.plug_stale_seconds)
+                self._next_poll = min(self._next_poll, time.monotonic())
+        elif not fresh and not self._awaiting_watts() and not self._watts_said_missing \
+                and self._plug_read_at is None and self._watts_wait_from is not None:
+            self._watts_said_missing = True
+            log.warning("no reading from the projector's plug in the %.0f s since the bridge started: asking the "
+                        "projector itself, as without the plug, until there is one", self.cfg.plug_stale_seconds)
+        return fresh
+
+    def _power_from_watts(self) -> PowerState:
+        """The power state the bridge acts on, from what the projector draws and the bridge's own commands, whose
+        effect the watts take a while to show. Standby at or below plug_standby_watts, on at plug_on_watts or
+        more. In between, it's on its way up or down, whichever way it was heading (see Config)."""
+        now = time.monotonic()
+        watts = self._plug_watts or 0.0
+        prev = self.state.power
+        lasted = now - self.state.power_since
+        ours_off = self._sent_off is not None and now - self._sent_off < self.cfg.plug_follow_seconds
+        why = f"the plug: {watts:.0f} W"
+        power = prev
+        band = ("on" if watts >= self.cfg.plug_on_watts else
+                "standby" if watts <= self.cfg.plug_standby_watts else "between")
+        fell, self._plug_band = self._plug_band == "on" and band == "between", band
+        if band == "on":
+            self._seen = PowerState.ON
+            if prev == PowerState.COOLING and self._sent_off is not None:
+                if not ours_off:  # still on, long after the bridge's "off"
+                    power = PowerState.ON
+                    why += f", {now - self._sent_off:.0f} s after the bridge's 'off': it didn't go off"
+            else:
+                power = PowerState.ON
+        elif band == "standby":
+            self._seen = PowerState.OFF
+            held = prev == PowerState.WARMING and self._start_held()  # just started: its draw hasn't risen yet
+            if not held and not (prev == PowerState.COOLING and self._in_cooldown()):
+                power = PowerState.OFF
+                if prev == PowerState.ON and self._doubt_on:  # a reading said on, but it's drawing standby power
+                    why += ": the standby that answers as if it were on, after a power cut"
+        else:  # in between: on its way up from standby, or down from on
+            self._seen = PowerState.WARMING
+            if prev in (PowerState.OFF, PowerState.UNKNOWN):
+                power = PowerState.WARMING
+            elif prev == PowerState.ON:
+                if fell:
+                    power = PowerState.COOLING
+            elif lasted >= self.cfg.plug_follow_seconds:  # no further after all
+                after_off = prev == PowerState.COOLING and self._sent_off is not None
+                power = PowerState.OFF if after_off else PowerState.ON
+                why += f", in between for {lasted:.0f} s: taken as " + (
+                    "standby after the bridge's 'off'" if after_off else "on")
+        if power in (PowerState.OFF, PowerState.COOLING):
+            if not self._start_held() or self._doubt_on:  # with doubt, what looked like a start was that standby
+                self._started_at = None
+        elif self._started_at is None and power != prev and (
+                power == PowerState.WARMING or prev in (PowerState.OFF, PowerState.COOLING)):
+            self._started_at = now  # out of standby without us: its remote, or its own button
+            if prev == PowerState.COOLING:  # it never got as low as standby: held all the same, in case
+                log.info("the projector is drawing as much as when on again: a dim picture, perhaps, or its remote "
+                         "started it again. Holding power commands as after a start")
+            else:
+                log.info("the projector is %s, and the bridge didn't start it: its remote or its own button did",
+                         "drawing more than in standby" if power == PowerState.WARMING else "on")
+        if watts > self.cfg.plug_standby_watts:
+            self._doubt_on = ""  # more than any standby draws: whatever it is, it isn't the standby that looks on
+        self._confirm_standby_at = None
+        self.state.connected = True
+        self._set_power(power, why)
+        self._confirmed_at = now
+        return power
 
     def _refresh_quietly(self) -> None:
         s = self.state
