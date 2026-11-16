@@ -128,8 +128,8 @@ the wall.
     don't follow them. Of the two hung "on"s the plug recorded, one came during a fan run, and one
     33 minutes after one. A hung projector keeps running them.
   - On 16 November, an hour into a hang, its remote got it out without a power-cycle. The first press
-    didn't start it, but for about 70 s its draw looked like a boot: a dip to 7 W, then 12–17.5 W.
-    The second press started it as usual. On 9 November, 2 minutes into a hang, the remote got no
+    didn't start it, but its draw looked like a boot: a dip to 7 W, then 12–17.5 W. It was still at
+    15.5 W 65 s later, and the second press, at 72 s, started it as usual. On 9 November, 2 minutes into a hang, the remote got no
     reaction at all.
 - **It misses a reply to the power query now and then:** about once a day at one check every 2 s,
   from 21 October. On 24 October it stayed on throughout one, so it wasn't a power cut.
@@ -354,13 +354,13 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
   - At the next hang, read the plug before anyone power-cycles it (MQTT, above), then try the
     remote twice, about 70 s apart.
   - Shorten the wait after the power returns from 300 s to 70 s: add
-    `X100_POWER_UP_QUIET_SECONDS=70` to bridge.env by hand. That's the longest boot seen so far
-    (65 s) and 5 s more. When the wait ends the bridge asks everything at once, so this is when the
+    `X100_POWER_UP_QUIET_SECONDS=70` to bridge.env by hand. That's the longest boot-like draw seen
+    so far (still going at 65 s, below) and 5 s more. When the wait ends the bridge asks everything at once, so this is when the
     first questions arrive. The evidence, in seconds after the power returns:
     - 0–30: only the power query answers, and questions every second from the start hung it twice.
     - 0–53: the boot shows in the plug's watts (9 November): a peak of 19.6 W at 33 s, then a
-      steady 12 W from 53 s. On 16 November a remote press out of a hang gave a boot-like draw for
-      about 65 s.
+      steady 12 W from 53 s. On 16 November, after a remote press out of a hang, a boot-like draw
+      was still going at 65 s, when the second press came at 72 s, so its end wasn't seen.
     - 80 to 300: on 7 November a full reading and "on" came somewhere in this range after a plug
       power-cycle, and were fine. That's the earliest question known to be safe.
     - 480 and more: full readings 8, 9 and 13 minutes after power-ups on 15 October were fine.

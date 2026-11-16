@@ -248,8 +248,8 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
   October it sometimes hung in standby, after an "off" from the bridge or from its remote, soon after
   a start or hours later, and it still does: 4 times in 16 standby periods from 2 to 16 November.
   Why isn't known yet: the bridge's log now records what came before each hang. Once, its remote got
-  it out of a hang in standby: the first press didn't start it, but it seemed to reboot for about
-  70 s, and the second started it. So the bridge:
+  it out of a hang in standby: the first press didn't start it, but it seemed to reboot for over a
+  minute, and the second started it. So the bridge:
   * asks only the power question once the projector stops answering, every 30 s, and when it answers
     again sends nothing at all for 5 minutes. Commands in that time get a spoken reply saying so, and
     the log says until when; the remote works once the projector has started up. Then it reads it
