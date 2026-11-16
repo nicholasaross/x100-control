@@ -353,6 +353,23 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
     firmware and its standby settings. RS-232 control has to stay on.
   - At the next hang, read the plug before anyone power-cycles it (MQTT, above), then try the
     remote twice, about 70 s apart.
+  - Shorten the wait after the power returns from 300 s to 90 s: add
+    `X100_POWER_UP_QUIET_SECONDS=90` to bridge.env by hand. When the wait ends the bridge asks
+    everything at once, so this is when the first questions arrive. The evidence, in seconds after
+    the power returns:
+    - 0–30: only the power query answers, and questions every second from the start hung it twice.
+    - 0–53: the boot shows in the plug's watts (9 November): a peak of 19.6 W at 33 s, then a
+      steady 12 W from 53 s. On 16 November a remote press out of a hang gave a boot-like draw for
+      about 65 s.
+    - 80 to 300: on 7 November a full reading and "on" came somewhere in this range after a plug
+      power-cycle, and were fine. That's the earliest question known to be safe.
+    - 480 and more: full readings 8, 9 and 13 minutes after power-ups on 15 October were fine.
+    - The 300 s came with the first build, with no reason recorded.
+
+    90 s clears every boot seen so far by 25 s or more, and is three times the window known to
+    hang it. Lower would cut it too fine on one timed boot. To show it safe directly: stop the bridge,
+    press the plug's button (it comes back on after 2 minutes), run `x100ctl status` 90 s after
+    it does, then start the projector with its remote. If that works, the same test could try 60 s.
 
   To count them:
   - Count the "acknowledged power on but hasn't started" lines in `journalctl -u x100-bridge`.
