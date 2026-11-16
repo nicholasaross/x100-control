@@ -127,8 +127,12 @@ class Config:
     # A smart plug on the projector's mains sees every cut, however short (see plug.py). While it reports its
     # output off, nothing is sent; once it's back on, the quiet below. A plug that reconnects to its broker
     # may have restarted, which cuts the power too: the bridge sends nothing until the plug's next reading,
-    # for up to plug_check_seconds, and takes it as a cut unless the projector is drawing plug_on_watts or
-    # more. Then it's on, which it can't be so soon after a cut.
+    # for up to plug_check_seconds. It takes it as a cut unless that reading shows the plug kept running:
+    # last switched by something other than its start-up ("init"), and switched on no more times than
+    # before. Nick's plug dropped out like that, without restarting, 4 times from 8 to 16 November 2026.
+    # Whatever the reading, if the projector is drawing plug_on_watts or more, it's on, which it can't be so
+    # soon after a cut. And a reading at any time that shows more switch-ons than the last one means the
+    # plug switched off and on unseen: that's a cut too.
     plug_mqtt: str = ""             # the plug's MQTT broker, host:port; "" for none
     plug_prefix: str = ""           # the plug's MQTT prefix
     plug_check_seconds: float = 10.0
@@ -342,10 +346,12 @@ class BridgeCore:
         self._time_mark = time.monotonic()
         self._next_summary = time.monotonic() + cfg.summary_seconds
         self._uptime = uptime
-        # The plug on its mains, if any (see Config): what it last said about its output, and when, after it
-        # reconnects, its silence counts as a restart. Its reports arrive from another thread.
+        # The plug on its mains, if any (see Config): what it last said about its output and its count of
+        # switch-ons, and when, after it reconnects, its silence counts as a restart. Its reports arrive from
+        # another thread.
         self._plug_news: "queue.Queue[tuple]" = queue.Queue()
         self._plug_output: Optional[bool] = None
+        self._plug_switch_ons: Optional[int] = None
         self._plug_check_until: Optional[float] = None
         # With plug_state: its latest watts, and when, and whether the bridge is going by them (see Config).
         self._plug_watts: Optional[float] = None
@@ -394,10 +400,12 @@ class BridgeCore:
         """Called after (re)connecting to AWS: push the whole state again."""
         self._full_publish.set()
 
-    def plug_status(self, output: bool, watts: Optional[float] = None, source: str = "") -> None:
+    def plug_status(self, output: bool, watts: Optional[float] = None, source: str = "",
+                    switch_ons: Optional[int] = None) -> None:
         """Called from the plug's MQTT thread with each reading: whether its output is on, the watts the
-        projector draws, and what last switched it ("button", "init" for its start-up, ...)."""
-        self._plug_news.put(("status", output, watts, source, time.monotonic()))
+        projector draws, what last switched it ("button", "init" for its start-up, ...), and how many times
+        its output has been switched on."""
+        self._plug_news.put(("status", output, watts, source, switch_ons, time.monotonic()))
 
     def plug_reconnected(self) -> None:
         """Called from the plug's MQTT thread when the plug reconnects to its broker: it may have restarted."""
@@ -1105,7 +1113,7 @@ class BridgeCore:
                 self._plug_says(*news[1:])
         if self._plug_check_until is not None and time.monotonic() >= self._plug_check_until:
             self._plug_check_until = None
-            self._plug_restarted(f"there was no reading from it within {self.cfg.plug_check_seconds:.0f} s")
+            self._plug_cut(f"there was no reading from it within {self.cfg.plug_check_seconds:.0f} s")
         if news_came and self._watch_watts() and not (self._quiet() or self._plug_holding() or self._link_down()
                                                       or self._full_reading_due):
             self._power_from_watts()
@@ -1117,9 +1125,16 @@ class BridgeCore:
         log.warning("the projector's plug has reconnected, and may have restarted, which cuts the projector's "
                     "power: sending the projector nothing until the plug says what it's drawing")
 
-    def _plug_says(self, output: bool, watts: Optional[float], source: str, at: Optional[float] = None) -> None:
+    def _plug_says(self, output: bool, watts: Optional[float], source: str, switch_ons: Optional[int] = None,
+                   at: Optional[float] = None) -> None:
         """``at``: when the reading arrived, as the bridge may have been busy with a command meanwhile."""
         was, self._plug_output = self._plug_output, output
+        counted = self._plug_switch_ons
+        if switch_ons is not None:
+            self._plug_switch_ons = switch_ons
+        same_count = counted is not None and switch_ons is not None and switch_ons <= counted
+        unseen_cycle = was is True and output and counted is not None and switch_ons is not None and \
+            switch_ons > counted
         if watts is not None:
             self._plug_watts = watts if output else 0.0
             self._plug_read_at = at if at is not None else time.monotonic()
@@ -1140,22 +1155,43 @@ class BridgeCore:
             log.warning("the projector's plug has switched its power back on%s: leaving the projector alone until "
                         "%s, as questions while it boots can hang it", by, self._quiet_end())
             return
-        if self._plug_check_until is not None:
-            self._plug_check_until = None
-            if watts is not None and watts >= self.cfg.plug_on_watts:
-                log.info("the projector's plug is back, and the projector is drawing %.0f W, so it's on: its power "
-                         "wasn't cut", watts)
+        if self._plug_check_until is None and not unseen_cycle:
+            return
+        self._plug_check_until = None
+        drawing = f"{watts:.0f} W" if watts is not None else "an unknown power"
+        if watts is not None and watts >= self.cfg.plug_on_watts:
+            if unseen_cycle:
+                log.info("the projector's plug has switched off and on unseen, but the projector is drawing %s, so "
+                         "it's on, and past booting", drawing)
             else:
-                self._plug_restarted("the projector is drawing " + (f"{watts:.0f} W" if watts is not None
-                                                                     else "an unknown power"))
+                log.info("the projector's plug is back, and the projector is drawing %s, so it's on: its power "
+                         "wasn't cut", drawing)
+        elif unseen_cycle:
+            more = switch_ons - counted
+            self._plug_cut(f"it has been switched on {more} more time{'' if more == 1 else 's'} since its last "
+                           f"reading, so it switched off and on unseen, and the projector is drawing {drawing}")
+        elif source and source != "init" and same_count:
+            log.info("the projector's plug is back, and didn't restart: it was last switched by %r, not by its "
+                     "start-up, and no more times than before", source)
+        else:
+            if source == "init":
+                doubt = "it was last switched by its start-up"
+            elif not source:
+                doubt = "it doesn't say what last switched it"
+            elif switch_ons is None:
+                doubt = "it doesn't say how many times it has been switched on"
+            else:
+                doubt = "there's no earlier count of its switch-ons to go by"
+            self._plug_cut(f"{doubt}, and the projector is drawing {drawing}")
 
-    def _plug_restarted(self, why: str) -> None:
-        """The plug reconnected, and nothing shows the projector kept its power: take it as a cut."""
+    def _plug_cut(self, why: str) -> None:
+        """The plug reconnected, or was switched on unseen, and nothing shows the projector kept its power: take
+        it as a cut."""
         self.state.connected = False
-        self._after_cut("the plug reconnected, perhaps after restarting: it comes back in standby",
-                        "the plug restarted, perhaps, which cuts its power")
-        log.warning("taking the plug's reconnection for a restart, which cuts the projector's power (%s): leaving "
-                    "the projector alone until %s, as questions while it boots can hang it", why, self._quiet_end())
+        self._after_cut("the plug may have cut its power: it comes back in standby",
+                        "the plug restarted, perhaps, or switched off and on unseen, which cuts its power")
+        log.warning("taking it that the plug cut the projector's power (%s): leaving the projector alone until %s, "
+                    "as questions while it boots can hang it", why, self._quiet_end())
 
     # ------------------------------------------------------------------ on or standby, by the plug's watts
     def _watts_fresh(self) -> bool:

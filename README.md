@@ -272,7 +272,9 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
     sees every power cut, however short. While the plug's output is off, it sends the projector
     nothing, and once it's back on it gives it the 5 minutes' quiet. A plug that reconnects to its
     MQTT broker may have restarted, which cuts the power too. So until the plug's next reading, for
-    up to 10 s, it sends nothing, then takes it as a cut unless the projector is drawing full power.
+    up to 10 s, it sends nothing. Then it takes it as a cut, unless the reading shows the plug didn't
+    restart (it wasn't last switched by its start-up, and hasn't been switched on again), or the
+    projector is drawing full power. A plug that drops out for a moment doesn't hold anything up.
     It only reads the plug, and never switches it. `X100_PLUG_MQTT` and `X100_PLUG_PREFIX` in
     `bridge.env` turn this on (the example file says how), and `x100-bridge --check` tests them;
   * with that plug and `X100_PLUG_STATE=true`, an experiment, tells on from standby by what the

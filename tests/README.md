@@ -23,7 +23,8 @@ The code runs on Python 3.11 only, as the Pi does, so test on 3.11.
   single missed reply isn't taken for a power cut, a standby reading straight after "on" is checked
   again, and a hang's log line says what came before it. And a power cycle by the plug on its
   mains, too quick for checks once an hour to see: the bridge leaves the projector alone once the plug
-  reports it, and takes a plug that reconnects to its broker for a restart unless the projector is on.
+  reports it, and takes a plug that reconnects to its broker for a restart unless its reading shows it
+  kept running, or the projector is on. A count of switch-ons that goes up means an off and on unseen.
 * `test_plug.py` – reading that plug: its MQTT status, its settings, a broker that isn't there, and a
   cut it reports over MQTT, end to end (the tests with a broker skip if `amqtt` isn't installed).
 * `test_replies.py` – the spoken replies: the bridge's reason for a refusal, the line the listener picks

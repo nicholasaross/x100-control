@@ -1172,6 +1172,104 @@ def test_a_plug_that_reconnects_while_the_projector_is_on_didnt_cut_it(x100, cap
         core.stop()
 
 
+def plug_reading_as_usual(core, switch_ons=4):
+    """The plug's reading about once a minute, as Nick's sent them from 9 November 2026: last switched by its
+    auto_on timer, after a press of its button."""
+    core.plug_status(True, 12.1, "timer", switch_ons)
+    assert wait_for(lambda: core._plug_switch_ons == switch_ons, limit=1)
+
+
+def test_a_plug_that_drops_off_its_broker_for_a_moment_didnt_cut_the_power(x100, caplog):
+    """From 8 to 16 November 2026 Nick's plug dropped off its broker and back within 3 s four times, all in
+    standby. Its output stayed on, last switched by its timer, and switched on no more times than before.
+    Taken for restarts, each would have refused commands for 5 minutes."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core = bridge(x100, **HOURLY)
+    try:
+        hourly_checks_under_way(core)
+        plug_reading_as_usual(core)
+        core.plug_reconnected()
+        core.plug_status(True, 12.0, "timer", 4)  # straight after, as it does
+        assert wait_for(lambda: any("didn't restart" in r.getMessage() for r in caplog.records), limit=2)
+        assert not core._quiet() and core._plug_check_until is None and core._lost_since is None
+        assert core.submit_and_wait(ON)["ok"]
+        assert wait_for(lambda: mock_power(x100) == PowerState.ON, limit=4) and not x100.state.hung
+    finally:
+        core.stop()
+
+
+@pytest.mark.parametrize("source, switch_ons, before", [
+    ("init", 4, 4),      # its start-up: it restarted, whatever the count
+    ("", 4, 4),          # it doesn't say what last switched it
+    ("timer", None, 4),  # it doesn't say how many times it has been switched on
+    ("timer", 4, None),  # nothing earlier to compare with
+])
+def test_a_plug_that_reconnects_is_taken_to_have_restarted_unless_its_reading_shows_otherwise(
+        x100, caplog, source, switch_ons, before):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    booting_x100(x100)
+    core = bridge(x100, **HOURLY)
+    try:
+        hourly_checks_under_way(core)
+        if before is not None:
+            plug_reading_as_usual(core, before)
+        heard = len(x100.state.log)
+        plug_cycle(x100)  # say it did restart
+        core.plug_reconnected()
+        core.plug_status(True, 12.1, source, switch_ons)
+        assert wait_for(core._quiet, limit=2)
+        assert any("plug cut the projector's power" in r.getMessage() for r in caplog.records)
+        assert not core.submit_and_wait(ON)["ok"] and len(x100.state.log) == heard
+        assert wait_for(lambda: not core._quiet(), limit=3)
+        assert not x100.state.hung and core.submit_and_wait(ON)["ok"]
+    finally:
+        core.stop()
+
+
+@pytest.mark.parametrize("reconnected", [True, False])
+def test_an_off_and_on_the_plug_couldnt_report_is_still_taken_for_a_cut(x100, caplog, reconnected):
+    """Say someone presses the plug's button while it's out of touch with its broker: it comes back on by its
+    timer 2 minutes later, and then reconnects, last switched by its timer, like a moment out of touch. Asked
+    anything then, the booting projector hangs, as in test_a_plug_cycle_between_hourly_checks_used_to_hang_it.
+    But its count of switch-ons has gone up. Without the reconnect, the bridge itself may have been out of touch
+    with the broker."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    booting_x100(x100)
+    core = bridge(x100, **HOURLY)
+    try:
+        hourly_checks_under_way(core)
+        plug_reading_as_usual(core, 4)
+        heard = len(x100.state.log)
+        plug_cycle(x100)  # not reported
+        if reconnected:
+            core.plug_reconnected()
+        core.plug_status(True, 12.4, "timer", 5)
+        assert wait_for(core._quiet, limit=2)
+        assert any("switched off and on unseen" in r.getMessage() for r in caplog.records)
+        refused = core.submit_and_wait(ON)
+        assert not refused["ok"] and "may still be booting" in refused["message"]
+        assert len(x100.state.log) == heard
+        assert wait_for(lambda: not core._quiet(), limit=3)
+        assert not x100.state.hung and core.submit_and_wait(ON)["ok"]
+    finally:
+        core.stop()
+
+
+def test_more_switch_ons_while_the_projector_is_drawing_full_power_arent_a_cut(x100, caplog):
+    """It was switched off and on unseen some time ago, and has been started since: it's past booting."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core = bridge(x100, **HOURLY)
+    try:
+        assert core.submit_and_wait(ON)["ok"]
+        assert wait_for(lambda: core.state.power == PowerState.ON and mock_power(x100) == PowerState.ON, limit=4)
+        core.plug_status(True, 150.3, "timer", 4)
+        core.plug_status(True, 150.1, "timer", 5)
+        assert wait_for(lambda: any("past booting" in r.getMessage() for r in caplog.records), limit=2)
+        assert not core._quiet() and core.state.power == PowerState.ON
+    finally:
+        core.stop()
+
+
 # ---------------------------------------------------------------------------- on or standby, by the plug's watts
 
 

@@ -25,6 +25,11 @@ PREFIX = "test-plug"
 STANDBY = (b'{"id":0,"source":"init","tag":null, "output":true, "apower":12.1, "voltage":237.6, "current":0.086, '
            b'"aenergy":{"total":4847.616,"by_minute":[201.401,202.386,203.863],"minute_ts":1794083040},'
            b'"temperature":{"tC":39.9, "tF":103.8}}')
+# As it sent it on 14 November 2026, straight after a moment out of touch with its broker.
+TIMER = (b'{"id":0,"source":"timer","tag":null, "output":true, "apower":12.0, "voltage":236.2, "current":0.086, '
+         b'"aenergy":{"total":8829.626,"by_minute":[199.923,199.431,199.431],"minute_ts":1794673200},'
+         b'"counts":{"on_time":1207140,"on_time_rst_ts":0,"switch_on":4,"switch_on_rst_ts":0,"on_above_thr":120779,'
+         b'"on_above_thr_rst_ts":0},"temperature":{"tC":40.0, "tF":104.0}}')
 
 
 def free_port():
@@ -50,6 +55,9 @@ def test_its_status_is_read_from_what_a_shelly_sends():
     for junk in (b"", b"true", b"[1]", b'{"apower":12}', b'{"output":"on"}', b"\xff"):
         assert parse_switch_status(junk) is None
     assert parse_switch_status(b'{"output":true,"apower":true,"source":5}') == PlugStatus(True, None, "")
+    assert parse_switch_status(TIMER) == PlugStatus(True, 12.0, "timer", 4)
+    for counts in (b'{"switch_on":"4"}', b'{"switch_on":true}', b'[4]', b'4'):
+        assert parse_switch_status(b'{"output":true,"counts":' + counts + b'}').switch_ons is None
 
 
 def test_the_broker_is_host_and_port():
@@ -137,9 +145,9 @@ class Heard:
         self.statuses, self.reconnects = [], 0
         self.lock = threading.Lock()
 
-    def status(self, output, watts, source):
+    def status(self, output, watts, source, switch_ons):
         with self.lock:
-            self.statuses.append((output, watts, source))
+            self.statuses.append((output, watts, source, switch_ons))
 
     def reconnected(self):
         with self.lock:
@@ -159,7 +167,8 @@ def test_it_passes_on_each_reading_and_each_reconnection_and_publishes_nothing(b
         plug.send("status/sys", b'{"uptime":12}')  # not what it listens to
         plug.send("status/switch:0", b'{"output":false,"source":"button","apower":0}')
         assert wait_for(lambda: len(heard.statuses) == 2)
-        assert heard.statuses == [(True, 12.1, "init"), (False, 0.0, "button")] and heard.reconnects == 0
+        assert heard.statuses == [(True, 12.1, "init", None), (False, 0.0, "button", None)]
+        assert heard.reconnects == 0
         plug.send("online", b"false", retain=True)  # the broker's note that it dropped out
         assert wait_for(lambda: watcher.plug_online is False)
         plug.send("online", b"true", retain=True)  # back, perhaps after a restart
