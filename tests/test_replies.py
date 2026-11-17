@@ -8,6 +8,7 @@ import io
 import os
 import re
 import tarfile
+import time
 
 import pytest
 
@@ -56,7 +57,7 @@ def test_the_bridge_says_in_a_word_why_it_refused():
             assert core.submit_and_wait(ON)["reason"] == "plug_off"
             core.plug_status(True, 12.0, "button")
             assert wait_for(core._quiet)
-            assert core.submit_and_wait(ON)["reason"] == "booting"
+            assert core.submit_and_wait(ON)["reason"] == "booting_minute"  # a wait of 1.5 s here
             assert wait_for(lambda: not core._quiet() and core.state.connected, limit=4)
             with srv.state.lock:
                 srv.state.hung = True
@@ -81,6 +82,25 @@ def test_the_bridge_says_in_a_word_why_it_refused():
 ])
 def test_what_the_listener_says_for_each_answer(result, ops, said):
     assert reply_for(result, ops) == said
+
+
+def test_a_long_wait_after_a_power_cut_gets_a_few_minutes_and_its_last_90_s_a_minute():
+    """With the 60 s wait Nick chose on 17 November, "Give it a few minutes" was wrong."""
+    with MockServer(warmup=1.2, cooldown=0.4, quirks=True) as srv:
+        core = bridge(srv, **dict(POWER_CUT, power_up_quiet_seconds=91.0))
+        try:
+            core.plug_status(False, 0.0, "button")
+            refused = core.submit_and_wait(ON)
+            assert refused["reason"] == "plug_off" and "for 2 min while it boots" in refused["message"]
+            core.plug_status(True, 12.0, "button")
+            assert wait_for(core._quiet)
+            assert core.submit_and_wait(ON)["reason"] == "booting"  # 91 s to go
+            assert wait_for(lambda: core._quiet_until - time.monotonic() <= 89.5, limit=3)
+            assert core.submit_and_wait(ON)["reason"] == "booting_minute"
+            assert reply_for(Result(False, "NOT_IN_OPERATION", "", reason="booting_minute"), ON) == "booting_minute"
+            assert LINES["booting_minute"] == "The power's only just come back. Give it a minute."
+        finally:
+            core.stop()
 
 
 def test_every_reason_the_bridge_gives_has_a_line():

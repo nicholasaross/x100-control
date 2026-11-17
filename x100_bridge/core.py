@@ -52,6 +52,10 @@ log = logging.getLogger("x100.bridge")
 # this far apart or more: once an hour, say, but not every 2 s (43,000 a day). Unanswered ones always do.
 SERIAL_CHECKS_LOGGED_FROM = 60.0
 
+# While it's left alone after a power cut, a command is refused with "booting" ("Give it a few minutes"),
+# or with this much of the wait left or less, "booting_minute" ("Give it a minute"): all of a 60 s wait.
+BOOTING_MINUTE_SECONDS = 90.0
+
 OP_KINDS = ("power", "input", "volume", "volume_delta", "mute", "key")
 
 
@@ -261,7 +265,8 @@ def parse_scenes(text: str) -> Dict[str, int]:
 class BridgeError(Exception):
     """An error with an Alexa ErrorResponse type attached. ``reason``, where there is one, says in a word what
     went wrong, for the listener to say so out loud (x100_listener/replies.py): "plug_off", "plug_checking",
-    "booting", "unreachable", "not_started", "just_started", "looks_on", "projector_off" or "refused"."""
+    "booting", "booting_minute", "unreachable", "not_started", "just_started", "looks_on", "projector_off" or
+    "refused"."""
 
     def __init__(self, code: str, message: str, reason: str = ""):
         super().__init__(message)
@@ -1115,26 +1120,27 @@ class BridgeCore:
 
     def _check_link(self) -> None:
         """Before anything is sent: not a word to a projector that's booting, or isn't answering."""
+        wait = self._span(self.cfg.power_up_quiet_seconds)
         if self._plug_output is False:
             raise BridgeError("ENDPOINT_UNREACHABLE", "the projector's plug has switched its power off. Once it's "
-                              "back on, the bridge leaves the projector alone for a few minutes while it boots",
-                              "plug_off")
+                              f"back on, the bridge leaves the projector alone for {wait} while it boots", "plug_off")
         if self._plug_unpowered:
             raise BridgeError("ENDPOINT_UNREACHABLE", "the projector is drawing no power from its plug: it may have "
-                              "been unplugged. Once it draws power again, the bridge leaves it alone for a few minutes "
+                              f"been unplugged. Once it draws power again, the bridge leaves it alone for {wait} "
                               "while it boots", "unreachable")
         if self._plug_check_until is not None:
             raise BridgeError("NOT_IN_OPERATION", "the projector's plug has just reconnected, and may have restarted, "
                               "which cuts the projector's power. The bridge is checking: try again in a few seconds",
                               "plug_checking")
         if self._quiet():
+            left = self._quiet_until - time.monotonic()
             raise BridgeError("NOT_IN_OPERATION", f"the projector may still be booting after a power cut, so it's "
                               f"being left alone until {self._quiet_end()}: questions while it boots can hang it. "
-                              "Its remote works sooner, once it has started up", "booting")
+                              "Its remote works sooner, once it has started up",
+                              "booting_minute" if left <= BOOTING_MINUTE_SECONDS else "booting")
         if self._link_down():
             raise BridgeError("ENDPOINT_UNREACHABLE", "the projector isn't answering (switched off at the wall?). "
-                              "Once it's back, the bridge leaves it alone for a few minutes while it boots",
-                              "unreachable")
+                              f"Once it's back, the bridge leaves it alone for {wait} while it boots", "unreachable")
 
     def _probe_link(self) -> None:
         """While it isn't answering, ask only the power query: the X100-4K answers that even while

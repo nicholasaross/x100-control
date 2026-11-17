@@ -35,6 +35,7 @@ LINES: Dict[str, str] = {
     "plug_off": "The plug's switched off, so it's got no power. Not my fault, mate.",
     "plug_checking": "The plug's just restarted. Try again in a few seconds.",
     "booting": "The power's only just come back. Give it a few minutes.",
+    "booting_minute": "The power's only just come back. Give it a minute.",  # 90 s of the wait left, or less
     "not_started": "It didn't start. It might need switching off at the wall.",
     "just_started": "It's only just been started. Give it a minute.",
     "looks_on": "Can't tell if it's on, mate. Use the remote this time.",

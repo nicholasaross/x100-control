@@ -43,6 +43,7 @@ class Transport:
         self.min_gap = min_gap
         self._lock = threading.RLock()
         self._last_exchange = 0.0
+        self.sent_at = 0.0  # when the last command went out (time.monotonic), after the pause before it
         self.last_raw_reply: Optional[bytes] = None
 
     # -- subclass hooks -----------------------------------------------------
@@ -139,6 +140,7 @@ class Transport:
         if stale:  # a late reply, perhaps, or something it says by itself: worth seeing either way
             log.info("the projector sent %d bytes nobody was waiting for: %s", len(stale), describe_bytes(stale))
         log.debug("TX %s", packet.hex(" "))
+        self.sent_at = time.monotonic()
         self._send(packet)
         try:
             if not expect_reply:

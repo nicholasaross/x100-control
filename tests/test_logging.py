@@ -19,7 +19,7 @@ from x100 import protocol as p
 from x100.mock import MockServer
 from x100.projector import Projector
 from x100.protocol import PowerState
-from x100.transport import Transport, describe_bytes
+from x100.transport import TcpTransport, Transport, describe_bytes
 from x100_bridge.plug import format_message, record
 from x100_bridge.plugwatch import PlugWatch
 from x100_listener.listener import Event
@@ -71,6 +71,19 @@ def test_the_driver_tells_of_every_exchange_and_what_came_back(x100):
     heard.clear()
     proj.power_on()
     assert [(w, a) for w, a, _ in heard] == [("'on'", "ok")]
+
+
+def test_the_time_given_is_from_when_the_command_went_out_not_the_pause_before_it(x100):
+    """The transport keeps a pause between commands (0.1 s on the Pi): it was in the times, so every answer
+    looked 100 ms slower than it was."""
+    heard = []
+    proj = Projector(TcpTransport("127.0.0.1", x100.port, timeout=0.5, min_gap=0.3), probe_timeout=0.15)
+    proj.on_exchange = lambda what, answer, seconds: heard.append(seconds)
+    proj.power()
+    started = time.monotonic()
+    proj.power()  # waits out the 0.3 s pause first
+    assert time.monotonic() - started >= 0.25
+    assert heard[1] < 0.15
 
 
 def test_a_listener_that_fails_doesnt_get_in_a_commands_way(x100, caplog):

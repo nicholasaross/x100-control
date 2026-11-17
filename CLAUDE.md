@@ -199,7 +199,8 @@ the wall.
     start it leaves it in the same standby, so a second try says the same.
   - **Logs the serial traffic in words, unless it's simply on:** `serial (power check): power? on
     (35 ms)`, `serial (command power=OFF): power? on (31 ms) · input? 0x03 (40 ms) · 'off' ok
-    (45 ms)`. One line per poll, check or command, just before any change it leads to. Not the polls
+    (45 ms)`. One line per poll, check or command, just before any change it leads to. Each time runs
+    from when the command went out: the 0.1 s pause kept between commands (`X100_MIN_GAP`) isn't in it. Not the polls
     while it's on and nothing's happening, nor standby checks less than 60 s apart
     (`SERIAL_CHECKS_LOGGED_FROM`), which would be thousands a day. Bytes it sends unasked are logged
     too (`the projector sent … bytes nobody was waiting for`), as is a retry on a reopened link.
@@ -287,6 +288,8 @@ the wall.
   pace, with a little growl and gravel ("gruff"; the "sillier" 6.5 semitones was too much).
   - The bridge gives each refusal a `reason` ("plug_off", "booting", …: `BridgeError`), and the
     listener picks the line from that, or from the code when there's no reason.
+  - While it's left alone after a power cut, the reason is "booting" ("Give it a few minutes"), or with
+    90 s of the wait left or less, "booting_minute" ("Give it a minute"): all of Nick's 60 s wait.
   - Its log says what it played after each command: `said "It didn't start. …"`, or the chime.
   - Clips are made once by `x100-listener --make-replies`, which install.sh runs. It fetches the
     voice first (80 MB, checksummed, unpacked only inside its own folder). They're named by a hash
