@@ -177,6 +177,12 @@ the wall.
     `<prefix>/status/switch:0` and `<prefix>/online`, and only reads.
     - While the plug's output is off, it sends nothing, and refuses commands saying so. When the
       output comes back on, it gives the same 300 s quiet as after any cut.
+    - The same while the plug's output is on but the projector draws 3 W or less
+      (`X100_PLUG_UNPLUGGED_WATTS`): it has no power, unplugged from the plug, say. The quiet then
+      starts once it draws power again. On 17 November it was unplugged for about 1 s, which the
+      bridge didn't see, and 34 s into the boot a command made it ask everything. Standby has never
+      read below 11.5 W, and the dip as it starts never below 5.6 W. The plug's first readings
+      after its own power comes back can be 0 W too, for about a second.
     - A plug that reconnects to the broker (a live `online true`, not the retained one) may have
       restarted, which cuts the power. It sends nothing until the plug's next reading, for up to
       10 s (`plug_check_seconds`). Then it takes it as a cut, unless that reading shows the plug kept

@@ -1057,7 +1057,7 @@ def plug_cycle(srv, core=None, off_for=0.3):
     with srv.state.lock:
         srv.state.power_restored()
     if core is not None:
-        core.plug_status(True, 1.0, "button")
+        core.plug_status(True, 12.0, "button")  # as it read a second after its power came back, 9 November
 
 
 def test_a_plug_cycle_between_hourly_checks_used_to_hang_it(x100):
@@ -1111,7 +1111,7 @@ def test_while_the_plug_is_off_commands_get_an_answer_and_the_projector_hears_no
         assert core._lost_since is None and not core._quiet()  # it knows why: no checks, no probes
         with x100.state.lock:
             x100.state.power_restored()
-        core.plug_status(True, 1.0, "timer")  # its auto_on, 2 minutes later
+        core.plug_status(True, 12.0, "timer")  # its auto_on, 2 minutes later
         assert wait_for(core._quiet, limit=2)
         assert wait_for(lambda: not core._quiet() and core.state.connected, limit=4)
         assert [e for e in x100.state.log if "(booting)" in e] == []
@@ -1251,6 +1251,81 @@ def test_an_off_and_on_the_plug_couldnt_report_is_still_taken_for_a_cut(x100, ca
         assert len(x100.state.log) == heard
         assert wait_for(lambda: not core._quiet(), limit=3)
         assert not x100.state.hung and core.submit_and_wait(ON)["ok"]
+    finally:
+        core.stop()
+
+
+@pytest.mark.parametrize("unplugged_watts, hangs", [(-1.0, True), (3.0, False)])
+def test_a_projector_unplugged_from_its_plug_is_a_cut(x100, caplog, unplugged_watts, hangs):
+    """On 17 November 2026 the projector was unplugged from its plug for about 1 s, and then about 9 s. The
+    plug's own power stayed on, and it read 0 W. The bridge didn't see the first, and 34 s into the boot it
+    asked the projector everything. With no draw taken for nothing (-1 W), the simulator hangs."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    booting_x100(x100)
+    core = bridge(x100, **dict(HOURLY, plug_unplugged_watts=unplugged_watts))
+    try:
+        hourly_checks_under_way(core)
+        plug_reading_as_usual(core)
+        heard = len(x100.state.log)
+        with x100.state.lock:
+            x100.state.power_cut()
+        core.plug_status(True, 0.0, "timer", 4)  # unplugged: the plug's power is still on
+        if not hangs:
+            assert wait_for(lambda: core._plug_holding(), limit=1)
+            unplugged = core.submit_and_wait(ON)
+            assert not unplugged["ok"] and unplugged["code"] == "ENDPOINT_UNREACHABLE"
+            assert unplugged["reason"] == "unreachable" and "drawing no power" in unplugged["message"]
+        time.sleep(0.3)
+        with x100.state.lock:
+            x100.state.power_restored()
+        core.plug_status(True, 1.9, "timer", 4)  # plugged in again, as the plug read it: 1.9 W, 9.4 W, 11.5 W
+        core.plug_status(True, 9.4, "timer", 4)
+        if hangs:
+            time.sleep(0.2)
+            core.submit_and_wait(ON)
+            assert x100.state.hung
+            return
+        assert wait_for(core._quiet, limit=2)
+        refused = core.submit_and_wait(ON)
+        assert not refused["ok"] and "may still be booting" in refused["message"]
+        assert len(x100.state.log) == heard  # not a word while it had no power, nor while it boots
+        assert any("drawing power from its plug again" in r.getMessage() for r in caplog.records)
+        assert wait_for(lambda: not core._quiet(), limit=3)
+        assert not x100.state.hung and core.submit_and_wait(ON)["ok"]
+    finally:
+        core.stop()
+
+
+def test_the_quiet_after_the_plug_switches_back_on_starts_once_the_projector_draws_power(x100):
+    """On 9 November 2026 the plug's first readings after it switched its power back on were 0.0 W and 0.1 W,
+    and 12.0 W a second later."""
+    booting_x100(x100)
+    core = bridge(x100, **HOURLY)
+    try:
+        hourly_checks_under_way(core)
+        plug_reading_as_usual(core)
+        core.plug_status(False, 0.0, "button", 4)
+        core.plug_status(True, 0.0, "timer", 5)
+        core.plug_status(True, 0.1, "timer", 5)
+        assert wait_for(lambda: core._plug_switch_ons == 5, limit=1)
+        assert core._plug_holding() and not core._quiet()  # waiting for it to draw power
+        core.plug_status(True, 12.0, "timer", 5)
+        assert wait_for(core._quiet, limit=1) and not core._plug_holding()
+        assert core._today["outages"] == 1
+    finally:
+        core.stop()
+
+
+def test_a_dip_as_it_starts_isnt_taken_for_unplugging(x100):
+    """As it starts, by a serial "on" or its remote, its draw dips to 5.6-9.4 W for a second (11 to 17
+    November 2026)."""
+    core = bridge(x100, **HOURLY)
+    try:
+        plug_reading_as_usual(core)
+        core.plug_status(True, 5.6, "timer", 4)
+        core.plug_status(True, 30.3, "timer", 4)
+        time.sleep(0.2)
+        assert not core._plug_holding() and not core._quiet()
     finally:
         core.stop()
 

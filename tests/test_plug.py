@@ -211,7 +211,7 @@ def test_a_cut_the_plug_reports_over_mqtt_gets_the_projector_left_alone(broker):
             assert wait_for(lambda: core._plug_output is False)
             with srv.state.lock:
                 srv.state.power_restored()
-            plug.send("status/switch:0", json.dumps({"output": True, "apower": 1.2, "source": "button"}))
+            plug.send("status/switch:0", json.dumps({"output": True, "apower": 12.0, "source": "button"}))
             assert wait_for(core._quiet)
             refused = core.submit_and_wait([{"op": "power", "value": "ON"}])
             assert not refused["ok"] and "may still be booting" in refused["message"]
