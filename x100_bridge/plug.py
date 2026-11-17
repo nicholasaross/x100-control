@@ -36,6 +36,7 @@ class PlugStatus:
     output: bool                   # its output is on: the projector has power
     watts: Optional[float] = None  # what the projector is drawing
     source: str = ""               # what last switched it: "button", "init" (its start-up), "timer", ...
+    switch_ons: Optional[int] = None  # how many times its output has been switched on, ever
 
 
 def parse_broker(text: str) -> Tuple[str, int]:
@@ -61,15 +62,21 @@ def parse_switch_status(payload: bytes) -> Optional[PlugStatus]:
     if not isinstance(watts, (int, float)) or isinstance(watts, bool):
         watts = None
     source = doc.get("source")
-    return PlugStatus(doc["output"], None if watts is None else float(watts), source if isinstance(source, str) else "")
+    counts = doc.get("counts")
+    switch_ons = counts.get("switch_on") if isinstance(counts, dict) else None
+    if not isinstance(switch_ons, int) or isinstance(switch_ons, bool):
+        switch_ons = None
+    return PlugStatus(doc["output"], None if watts is None else float(watts), source if isinstance(source, str) else "",
+                      switch_ons)
 
 
 class PlugWatcher:
-    """Subscribes to the plug's status and passes it on: ``on_status(output, watts, source)`` for each
-    reading, and ``on_reconnected()`` when the plug reconnects to the broker, which it does after a restart.
-    Both are called from paho's network thread."""
+    """Subscribes to the plug's status and passes it on: ``on_status(output, watts, source, switch_ons)`` for
+    each reading, and ``on_reconnected()`` when the plug reconnects to the broker, which it does after a restart,
+    and after a moment out of touch. Both are called from paho's network thread."""
 
-    def __init__(self, broker: str, prefix: str, on_status: Callable[[bool, Optional[float], str], None],
+    def __init__(self, broker: str, prefix: str,
+                 on_status: Callable[[bool, Optional[float], str, Optional[int]], None],
                  on_reconnected: Callable[[], None]):
         import paho.mqtt.client as mqtt  # here, so that a bridge without a plug never needs it
 
@@ -147,4 +154,4 @@ class PlugWatcher:
             if status is None:
                 log.debug("ignoring a plug status that isn't one: %r", msg.payload[:200])
                 return
-            self.on_status(status.output, status.watts, status.source)
+            self.on_status(status.output, status.watts, status.source, status.switch_ons)

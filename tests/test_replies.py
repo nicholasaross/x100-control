@@ -54,7 +54,7 @@ def test_the_bridge_says_in_a_word_why_it_refused():
         try:
             core.plug_status(False, 0.0, "button")
             assert core.submit_and_wait(ON)["reason"] == "plug_off"
-            core.plug_status(True, 1.0, "button")
+            core.plug_status(True, 12.0, "button")
             assert wait_for(core._quiet)
             assert core.submit_and_wait(ON)["reason"] == "booting"
             assert wait_for(lambda: not core._quiet() and core.state.connected, limit=4)

@@ -41,7 +41,11 @@ changing anything.
     is off. On the network, Mosquitto takes only the plug, signed in. On the Pi itself, anyone can
     read, and nobody can write. So reading the plug needs no password:
     `mosquitto_sub -h 127.0.0.1 -p 1884 -t x100-plug/status/switch:0 -C 1 -W 90` on the Pi. It
-    sends about once a minute, and on any change: `output`, `apower` (watts), `source` and more.
+    sends about once a minute, and on any change: `output`, `apower` (watts), `source` (what last
+    switched it), `counts.switch_on` (how many times it has been switched on) and more.
+  - Now and then it drops off the broker and back within a few seconds, without restarting: 4 times
+    from 8 to 16 November. Its `source` and `counts.switch_on` then stay as they were. After a
+    restart, its `source` is `init`.
 - **On its HDMI:** one Roku stick, powered from the projector's USB port, with "1-touch play" (CEC)
   off. A Fire TV stick was removed on 2 November. The projector's "Auto Power On (CEC)" is off.
   The household switches the projector with its own remote.
@@ -173,10 +177,21 @@ the wall.
     `<prefix>/status/switch:0` and `<prefix>/online`, and only reads.
     - While the plug's output is off, it sends nothing, and refuses commands saying so. When the
       output comes back on, it gives the same 300 s quiet as after any cut.
+    - The same while the plug's output is on but the projector draws 3 W or less
+      (`X100_PLUG_UNPLUGGED_WATTS`): it has no power, unplugged from the plug, say. The quiet then
+      starts once it draws power again. On 17 November it was unplugged for about 1 s, which the
+      bridge didn't see, and 34 s into the boot a command made it ask everything. Standby has never
+      read below 11.5 W, and the dip as it starts never below 5.6 W. The plug's first readings
+      after its own power comes back can be 0 W too, for about a second.
     - A plug that reconnects to the broker (a live `online true`, not the retained one) may have
       restarted, which cuts the power. It sends nothing until the plug's next reading, for up to
-      10 s (`plug_check_seconds`). Then it takes it as a cut, unless the projector is drawing 50 W
-      or more (`plug_on_watts`), which means it's on and can't have just been cut.
+      10 s (`plug_check_seconds`). Then it takes it as a cut, unless that reading shows the plug kept
+      running: last switched by something other than `init`, and switched on no more times than
+      before. Without a reading, or with either fact missing, it's a cut.
+    - A reading at any time with more switch-ons than the last one means the plug switched off and
+      on unseen (its button, say, while it was out of touch): that's a cut too.
+    - Either way, if the projector is drawing 50 W or more (`plug_on_watts`), it's on and past
+      booting, so it isn't treated as a cut.
     - If the broker can't be reached, or the settings are wrong, it logs that once and carries on
       as without a plug.
   - **Can tell on from standby by the plug's watts, with `X100_PLUG_STATE=true`.** It's an
