@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple, Union
 
 HEADER_MAGIC = b"\x14\x00"
 
@@ -256,6 +256,57 @@ X100_IR_CODES: Dict[str, int] = {
     "audio_mode": 0x9E,
 }
 X100_IR_ADDRESS = (0x83, 0xF4)
+
+
+_READ_NAMES: Dict[Tuple[int, int], str] = {
+    (0x11, 0x00): "power?",
+    (0x14, 0x00): "mute?",
+    (0x14, 0x03): "volume?",
+    (0x13, 0x01): "input?",
+    (0x12, 0x09): "blank?",
+    (0x15, 0x01): "light-source hours?",
+}
+_WRITE_NAMES: Dict[Tuple[int, int, int], str] = {
+    (0x11, 0x00, 0x00): "'on'",
+    (0x11, 0x01, 0x00): "'off'",
+    (0x14, 0x00, 0x01): "mute on",
+    (0x14, 0x00, 0x00): "mute off",
+    (0x14, 0x01, 0x00): "volume up",
+    (0x14, 0x02, 0x00): "volume down",
+    (0x12, 0x09, 0x01): "blank on",
+    (0x12, 0x09, 0x00): "blank off",
+    (0x13, 0x00, 0x01): "freeze on",
+    (0x13, 0x00, 0x00): "freeze off",
+}
+
+
+def command_name(cmd: Union[Read, Write]) -> str:
+    """A command in a word or two, for the log: "power?", "volume?", "'on'", "input 0x03", ..."""
+    if isinstance(cmd, Read):
+        return _READ_NAMES.get((cmd.c1, cmd.c2), f"read {cmd.c1:02X} {cmd.c2:02X}?")
+    name = _WRITE_NAMES.get((cmd.c1, cmd.c2, cmd.data))
+    if name is not None:
+        return name
+    if (cmd.c1, cmd.c2) == (0x13, 0x01):
+        return f"input 0x{cmd.data:02X}"
+    if (cmd.c1, cmd.c2) == (0x13, 0x2A):
+        return f"volume {cmd.data}"
+    if (cmd.c1, cmd.c2) == (0x02, 0x04):
+        return f"key 0x{cmd.data:02X}"
+    return f"write {cmd.c1:02X} {cmd.c2:02X} {cmd.data:02X}"
+
+
+def answer_text(cmd: Read, value: int) -> str:
+    """What a read's answer means, for the log: "on" for the power query's 1, "off" for mute's 0, ..."""
+    key = (cmd.c1, cmd.c2)
+    if key == (0x11, 0x00):
+        state = POWER_FROM_VALUE.get(value)
+        return state.value.lower() if state is not None else str(value)
+    if key in ((0x14, 0x00), (0x12, 0x09)):
+        return "on" if value else "off"
+    if key == (0x13, 0x01):
+        return f"0x{value:02X}"
+    return str(value)
 
 
 def parse_hex_bytes(text: str) -> bytes:

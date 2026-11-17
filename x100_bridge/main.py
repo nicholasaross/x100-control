@@ -35,7 +35,7 @@ from x100.projector import projector_from_env
 
 from .core import BridgeCore, Config, system_uptime
 from .local_api import ApiConfigError, LocalApi, check_settings
-from .plug import PlugWatcher
+from .plug import PlugWatcher, record
 
 log = logging.getLogger("x100.bridge")
 
@@ -231,11 +231,30 @@ def run_check(cfg: Config, core: BridgeCore, api: Optional[LocalApi], link: Opti
     return 0 if ok else 1
 
 
+def record_plug(cfg: Config) -> int:
+    """``--record-plug``: a line for every message from the plug, on standard output, until stopped. Run as the
+    x100-plug-recorder service, it goes into the journal: ``journalctl -u x100-plug-recorder``."""
+    if not cfg.plug_enabled:
+        print("no plug to record: X100_PLUG_MQTT isn't set", flush=True)
+        return 0
+    stop = threading.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda signum, frame: stop.set())
+    try:
+        record(cfg.plug_mqtt, cfg.plug_prefix, lambda line: print(line, flush=True), stop)
+    except ValueError as exc:
+        print(f"can't record the plug: {exc}", flush=True)
+        return 2
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="x100-bridge", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--env-file", help="load settings from a KEY=VALUE file (e.g. bridge.env)")
     ap.add_argument("--check", action="store_true", help="test the projector and the API, then exit")
+    ap.add_argument("--record-plug", action="store_true",
+                    help="print every message from the projector's plug until stopped (it only reads)")
     ap.add_argument("--version", action="version", version=version_line(),
                     help="show which release is installed, then exit")
     args = ap.parse_args(argv)
@@ -248,6 +267,8 @@ def main(argv=None) -> int:
     except ValueError as exc:
         log.error("bad setting: %s", exc)
         return 2
+    if args.record_plug:
+        return record_plug(cfg)
     check_plug_state(cfg)
     problems = check_config(cfg)
     if problems:

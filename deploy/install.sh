@@ -210,7 +210,7 @@ fi
 
 step "systemd services"
 units=()
-[ "$bridge" -eq 1 ] && units+=(x100-bridge)
+[ "$bridge" -eq 1 ] && units+=(x100-bridge x100-plug-recorder)
 [ "$listener" -eq 1 ] && units+=(x100-listener)
 for unit in "${units[@]}"; do
   install -m 644 "$PREFIX/deploy/$unit.service" "/etc/systemd/system/$unit.service"
@@ -228,6 +228,11 @@ started=()
 if [ "$bridge" -eq 1 ] && [ "$bridge_ready" -eq 1 ]; then
   systemctl restart x100-bridge
   started+=(x100-bridge)
+fi
+# The plug recorder only reads the plug, and does nothing without one set in bridge.env.
+if [ "$bridge" -eq 1 ] && [ -n "$(get_env "$PREFIX/bridge.env" X100_PLUG_MQTT)" ]; then
+  systemctl restart x100-plug-recorder
+  started+=(x100-plug-recorder)
 fi
 if [ "$listener" -eq 1 ] && grep -Eq '^BRIDGE_TOKEN=.+' "$PREFIX/listener.env"; then
   systemctl restart x100-listener

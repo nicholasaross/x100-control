@@ -26,6 +26,9 @@ The code runs on Python 3.11 only, as the Pi does, so test on 3.11.
   reports it, and takes a plug that reconnects to its broker for a restart unless its reading shows it
   kept running, or the projector is on. A count of switch-ons that goes up means an off and on unseen,
   and a projector that draws nothing with the plug's power on has been unplugged from it.
+* `test_logging.py` – the log: the serial traffic in words, bytes sent unasked, what the plug's draw
+  says the projector did (from the real readings of 9 to 17 November), the standby period lines and
+  hangs, the daily totals, the reply the listener played, and the plug recorder.
 * `test_plug.py` – reading that plug: its MQTT status, its settings, a broker that isn't there, and a
   cut it reports over MQTT, end to end (the tests with a broker skip if `amqtt` isn't installed).
 * `test_replies.py` – the spoken replies: the bridge's reason for a refusal, the line the listener picks

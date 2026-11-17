@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional, Union
 
 from . import protocol as p
 from .protocol import Frame, PowerState, Read, Write
@@ -67,12 +68,28 @@ class PowerReading:
 
 
 class Projector:
-    """Talks to one projector. Thread-safe (the transport serialises exchanges)."""
+    """Talks to one projector. Thread-safe (the transport serialises exchanges).
+
+    ``on_exchange``, if set, hears about every command after it's answered (or not): its name ("power?",
+    "'off'"), what came back ("on", "ok", "no reply") and how long that took, for the bridge's log."""
 
     def __init__(self, transport: Transport, one_way: bool = False, probe_timeout: float = 0.6):
         self.transport = transport
         self.one_way = one_way
         self.probe_timeout = probe_timeout  # how long a powered-on projector may take to answer a probe
+        self.on_exchange: Optional[Callable[[str, str, float], None]] = None
+
+    def _note(self, cmd: Union[Read, Write], answer: str, started: float) -> None:
+        if self.on_exchange is None:
+            return
+        try:
+            self.on_exchange(p.command_name(cmd), answer, time.monotonic() - started)
+        except Exception:  # noting it for the log must never get in a command's way
+            log.exception("couldn't note an exchange with the projector")
+
+    @staticmethod
+    def _failure(exc: Unreachable) -> str:
+        return "no reply" if isinstance(exc.__cause__, ReplyTimeout) else f"link error ({exc})"
 
     # -- low level ------------------------------------------------------------
     def exchange(self, packet: bytes, expect_reply: bool = True, timeout: Optional[float] = None,
@@ -85,25 +102,42 @@ class Projector:
             raise Unreachable(str(exc)) from exc
 
     def write(self, cmd: Write) -> None:
-        frame = self.exchange(cmd.encode(), expect_reply=not self.one_way)
+        started = time.monotonic()
+        try:
+            frame = self.exchange(cmd.encode(), expect_reply=not self.one_way)
+        except Unreachable as exc:
+            self._note(cmd, self._failure(exc), started)
+            raise
         if self.one_way:
+            self._note(cmd, "sent", started)
             return
         assert frame is not None
         if frame.is_ack:
+            self._note(cmd, "ok", started)
             return
         if frame.is_disabled:
+            self._note(cmd, "refused", started)
             raise FunctionDisabled(f"projector refused {cmd}")
+        self._note(cmd, f"unexpected reply {frame.raw.hex(' ')}", started)
         raise UnexpectedReply(f"unexpected reply to {cmd}: {frame.raw.hex(' ')}")
 
     def read(self, cmd: Read, timeout: Optional[float] = None, retry: bool = True) -> int:
         if self.one_way:
             raise NotSupported("status reads need a two-way link")
-        frame = self.exchange(cmd.encode(), timeout=timeout, retry=retry)
+        started = time.monotonic()
+        try:
+            frame = self.exchange(cmd.encode(), timeout=timeout, retry=retry)
+        except Unreachable as exc:
+            self._note(cmd, self._failure(exc), started)
+            raise
         assert frame is not None
         if frame.is_reply:
+            self._note(cmd, p.answer_text(cmd, frame.value), started)
             return frame.value
         if frame.is_disabled:
+            self._note(cmd, "refused", started)
             raise FunctionDisabled(f"projector refused {cmd}")
+        self._note(cmd, f"unexpected reply {frame.raw.hex(' ')}", started)
         raise UnexpectedReply(f"unexpected reply to {cmd}: {frame.raw.hex(' ')}")
 
     def close(self) -> None:

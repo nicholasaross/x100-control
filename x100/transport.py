@@ -8,11 +8,19 @@ import threading
 import time
 from typing import Optional
 
-from .protocol import Frame, ProtocolError, frame_length, looks_like_header, parse_frame
+from .protocol import Frame, ProtocolError, describe, frame_length, looks_like_header, parse_frame
 
 log = logging.getLogger(__name__)
 
 DEFAULT_TCP_PORT = 4661
+
+
+def describe_bytes(data: bytes) -> str:
+    """Bytes nobody asked for, for the log: what they say if they make a frame, and the bytes themselves."""
+    try:
+        return f"{describe(parse_frame(data))} ({data.hex(' ')})"
+    except (ProtocolError, ValueError, IndexError):
+        return data.hex(" ")
 DEFAULT_BAUD = 115200
 
 
@@ -111,7 +119,7 @@ class Transport:
                     self.close()
                     if fresh or attempt == attempts:
                         raise
-                    log.debug("no reply on reused connection; retrying on a fresh one")
+                    log.info("no reply from the projector: asking again on a freshly opened link")
                 except (TransportError, OSError) as exc:
                     self.close()
                     if attempt == attempts:
@@ -128,8 +136,8 @@ class Transport:
         if gap > 0:
             time.sleep(gap)
         stale = self._drain()
-        if stale:
-            log.debug("discarded %d stale bytes: %s", len(stale), stale.hex(" "))
+        if stale:  # a late reply, perhaps, or something it says by itself: worth seeing either way
+            log.info("the projector sent %d bytes nobody was waiting for: %s", len(stale), describe_bytes(stale))
         log.debug("TX %s", packet.hex(" "))
         self._send(packet)
         try:
@@ -163,7 +171,7 @@ class Transport:
                 break
             window = window[1:] + more
         if skipped:
-            log.debug("skipped %d junk bytes: %s", len(skipped), skipped.hex(" "))
+            log.info("skipped %d bytes that weren't part of a reply: %s", len(skipped), skipped.hex(" "))
         if len(window) < 5 or not looks_like_header(window):
             got = skipped + window
             self.last_raw_reply = got or None
