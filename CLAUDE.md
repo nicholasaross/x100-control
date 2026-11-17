@@ -355,7 +355,8 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
   x100-control.zip && cd x100-control && sudo deploy/install.sh'`, and he types the password there.
   It ends with `Installed: … (build <id>, …)` and `Connection to x100-pi.local closed.`
 - **Tags so far:** `build-94bd0861`, `build-e776ca5b`, `build-df034892`, `build-91c5549f`,
-  `build-bbc37ab4` and `build-2d0dd24e`, the build installed since 17 November.
+  `build-bbc37ab4`, `build-2d0dd24e`, and `build-3dc308bf`, the build installed since 17:34 on
+  17 November.
 
 ## Working with Nick
 
@@ -389,7 +390,8 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
   (`X100_POWER_CHECK_SECONDS=3600`), and the CEC traffic cut (the Fire TV stick removed, the
   Roku's "1-touch play" off). From 18 to 27 October, at one check every 2 s, it was 4 of 9. So
   neither change stopped it.
-  - **The next phase, since 16:53 on 17 November:** build 2d0dd24e, with `X100_PLUG_MQTT=127.0.0.1:1884`,
+  - **The next phase, since 16:53 on 17 November:** build 2d0dd24e (3dc308bf since 17:34: the
+    "Give it a minute" reply, and serial times without the pause between commands), with `X100_PLUG_MQTT=127.0.0.1:1884`,
     `X100_PLUG_PREFIX=x100-plug`, `X100_PLUG_STATE=true` and `X100_POWER_UP_QUIET_SECONDS=60` added
     to bridge.env (the old one is kept beside it, as `bridge.env.bak-20261117-164935`). While the
     plug's readings are fresh, the bridge asks the projector nothing in standby, and nothing after an
@@ -446,9 +448,10 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
   the idea that the questions just after an "off" hang it (above).
   - The 25 W and 50 W bands hold against the starts and "off"s recorded from 8 to 16 November (its
     draw, above).
-- **A late answer in standby, 17 November.** At 16:53:54 the first reading after the restart for the
-  new build got 9 bytes after its question about the input had timed out (600 ms): a reply worth 6.
-  So its standby may answer "input?" slowly, rather than not at all. If more appear (`nobody was
+- **A late answer in standby, 17 November.** Twice, at 16:53:54 and 17:34:45, the first reading after
+  a restart for a new build got 9 bytes just after its question about the input had timed out
+  (600 ms): a reply worth 6 (`05 14 00 03 00 00 00 06 1d`). So its standby seems to answer "input?"
+  slowly, with 0x06, rather than not at all. If more appear (`nobody was
   waiting for` in the log), a long wait for that answer could read standby as on: the standby recheck
   waits 2 s (`confirm_input_wait`). With `X100_PLUG_STATE` and fresh readings there are no rechecks.
 - **A crash between 16 and 18 October** happened before the journal was persistent. Nick doesn't
