@@ -246,8 +246,10 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
   its own remote, until it has been switched off at the wall again. Left alone, it started fine. It
   also hung after an "off" 66 s after "on", just after the picture appeared. And from 14 to 27
   October it sometimes hung in standby, after an "off" from the bridge or from its remote, soon after
-  a start or hours later. Why isn't known yet: the bridge's log now records what came before each
-  hang. So the bridge:
+  a start or hours later, and it still does: 4 times in 16 standby periods from 2 to 16 November.
+  Why isn't known yet: the bridge's log now records what came before each hang. Once, its remote got
+  it out of a hang in standby: the first press didn't start it, but it seemed to reboot for over a
+  minute, and the second started it. So the bridge:
   * asks only the power question once the projector stops answering, every 30 s, and when it answers
     again sends nothing at all for 5 minutes. Commands in that time get a spoken reply saying so, and
     the log says until when; the remote works once the projector has started up. Then it reads it
@@ -290,7 +292,8 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
   * never sends "on" by itself, and says "ok" to an "on" only once the projector has visibly started
     (from standby it stops answering about its volume at once), about 3 s after the command.
 
-  Best avoided all the same: switching it off at the wall. If it ever hangs, switch it off at the wall
+  Best avoided all the same: switching it off at the wall. If it ever hangs, first try its remote:
+  press once, wait about 70 s, and press again. If it still won't start, switch it off at the wall
   for 2 minutes and back on, then leave it 3 minutes before using its remote. `X100_START_HOLD_SECONDS`,
   `X100_POWER_UP_QUIET_SECONDS`, `X100_OUTAGE_PROBE_SECONDS`, `X100_POWER_CHECK_SECONDS` and the start-up timings
   (`X100_COOLDOWN_SECONDS`, `X100_WARMUP_SECONDS`, `X100_SETTLE_SECONDS`) are in `bridge.env`.
@@ -344,7 +347,7 @@ woke it" is always slower, as it replays the last 0.5 s into the spotter; the ne
 | Two falling notes or a spoken reply | The log line says why. `BRIDGE_UNREACHABLE`: `x100-bridge` isn't running (`systemctl status x100-bridge`). `UNAUTHORIZED`: `BRIDGE_TOKEN` doesn't match `LOCAL_API_TOKEN`. `ENDPOINT_UNREACHABLE`: the bridge can't reach the projector (cable, adapter, RS-232 Control). |
 | Chimes where you'd expect the voice | Its clips aren't made yet: the listener's log says which. Run `cd /opt/x100-control && sudo -u x100 .venv/bin/x100-listener --env-file listener.env --make-replies`, then `sudo systemctl restart x100-listener`. Or `REPLIES=chimes` is set in listener.env. |
 | Two rising notes but nothing happened | It probably heard the other command (on/off) and there was nothing to do. Say it again. |
-| Two falling notes or a spoken reply after "on", and the log says the projector "hasn't started" | It acknowledged "on" but stayed in standby: it has probably hung. If its remote can't start it either, switch it off at the wall for 2 minutes, back on, and leave it 3 minutes before using the remote (the bridge stays quiet meanwhile). |
+| Two falling notes or a spoken reply after "on", and the log says the projector "hasn't started" | It acknowledged "on" but stayed in standby: it has probably hung. Try its remote: press once, wait about 70 s, and press again. If that can't start it either, switch it off at the wall for 2 minutes, back on, and leave it 3 minutes before using the remote (the bridge stays quiet meanwhile). |
 | Two falling notes or a spoken reply, and the log says the projector "may still be booting" | It stopped answering for a while (a power cut, say), and questions while it boots can hang it, so the bridge leaves it alone for 5 minutes after it answers again (the log says until when). Its remote works once it has started up. |
 | Two falling notes or a spoken reply, and the log says the projector's plug "has switched its power off" | The plug's output is off, so the projector has no power. Switch it back on with the plug's button. Then the bridge leaves the projector alone for 5 minutes while it boots. |
 | Two falling notes or a spoken reply, and the log says the projector's plug "has just reconnected" | The plug may have restarted, which cuts the projector's power. The bridge waits for the plug's next reading, for up to 10 s. Try again then. |
