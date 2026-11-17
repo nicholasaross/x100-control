@@ -423,14 +423,12 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
     and when it began, what was asked meanwhile, and how it ended (started, hung, or a cut).
   - The `plug:` lines show every start and "off", by the bridge or not, and each "on" a hang ignored.
   - The daily `in the last 24 h:` lines give the totals, hangs included.
-- **A recording of the plug, on the Pi.** Since 20:11 on 8 November, a read-only `mosquitto_sub`,
-  run as x100-controller, has added every message from the plug to `~/plug-capture.log`, about
-  1 MB a day. It shows every start and "off", however made, and each fan run. It doesn't survive a
-  restart of the Pi. Stop it with `pkill -u x100-controller mosquitto_sub`, and delete the log only
-  with Nick's OK.
-  - The `x100-plug-recorder` service has replaced it since 16:53 on 17 November:
-    `journalctl -u x100-plug-recorder` has every message, one line each, and it survives restarts.
-    The old one can stop, with Nick's OK.
+- **Recordings of the plug, on the Pi.** The `x100-plug-recorder` service has recorded every message
+  from the plug since 16:53 on 17 November: `journalctl -u x100-plug-recorder`, one line each, and
+  it survives restarts. It shows every start and "off", however made, each fan run and each boot.
+  - Before it, from 20:11 on 8 November to 16:59 on 17 November, a temporary `mosquitto_sub`
+    recorded the same to `~/plug-capture.log` (11.6 MB), the source of most of November's findings.
+    It was stopped with Nick's OK. Keep the log: delete it only with his OK.
 - **install.sh leaves a root-owned cache file in the unpacked release folder.** Its package check
   runs Python as root from that folder, which also means the check imports the unpacked copy, not
   the installed one. Until that's fixed, the install step uses `sudo rm`.
