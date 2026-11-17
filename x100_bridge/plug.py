@@ -3,8 +3,8 @@
 The X100-4K hangs if it's asked anything but the power query while it boots after a power cut, and
 a cut that falls between two of the bridge's checks goes unseen. A Shelly Gen2 plug (a Shelly Plus
 Plug, say) reports every change of its output over MQTT, with the watts it's passing. The bridge
-leaves the projector alone while the plug's output is off, and for a few minutes after it comes
-back on (see Config in core.py). With X100_PLUG_STATE, it also tells on from standby by the watts,
+leaves the projector alone while the plug's output is off, and for a while after it comes back on
+(X100_POWER_UP_QUIET_SECONDS: see Config in core.py). With X100_PLUG_STATE, it also tells on from standby by the watts,
 and asks the projector nothing but what a command needs.
 
 It only reads: it subscribes to the plug's status and publishes nothing, so it can't switch the

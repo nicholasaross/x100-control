@@ -1571,7 +1571,7 @@ def test_going_by_watts_after_a_plug_cycle_it_is_left_alone_then_read_once(x100)
         with x100.state.lock:
             x100.state.power_restored()
         assert wait_for(core._quiet, limit=2)
-        assert core.submit_and_wait(ON)["reason"] == "booting"
+        assert core.submit_and_wait(ON)["reason"] == "booting_minute"  # a wait of 1.5 s here
         assert wait_for(lambda: not core._quiet() and core._by_watts and not core._full_reading_due, limit=4)
         time.sleep(0.5)
         assert core._today["full readings"] == readings + 1  # once, to tell its standby, and then nothing

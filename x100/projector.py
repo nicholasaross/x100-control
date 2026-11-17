@@ -71,7 +71,8 @@ class Projector:
     """Talks to one projector. Thread-safe (the transport serialises exchanges).
 
     ``on_exchange``, if set, hears about every command after it's answered (or not): its name ("power?",
-    "'off'"), what came back ("on", "ok", "no reply") and how long that took, for the bridge's log."""
+    "'off'"), what came back ("on", "ok", "no reply") and how long that took, from when the command went
+    out (not counting the pause the transport keeps between commands), for the bridge's log."""
 
     def __init__(self, transport: Transport, one_way: bool = False, probe_timeout: float = 0.6):
         self.transport = transport
@@ -82,8 +83,10 @@ class Projector:
     def _note(self, cmd: Union[Read, Write], answer: str, started: float) -> None:
         if self.on_exchange is None:
             return
+        sent = getattr(self.transport, "sent_at", 0.0)
+        since = sent if sent >= started else started  # it went out during this call: time it from then
         try:
-            self.on_exchange(p.command_name(cmd), answer, time.monotonic() - started)
+            self.on_exchange(p.command_name(cmd), answer, time.monotonic() - since)
         except Exception:  # noting it for the log must never get in a command's way
             log.exception("couldn't note an exchange with the projector")
 
