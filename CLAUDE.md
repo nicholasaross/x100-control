@@ -29,7 +29,7 @@ changing anything.
   - The Pi has no clock battery. After a boot its log carries the time it shut down until the
     network corrects the clock, so the first lines of a boot can be days out.
 - **The projector's mains goes through a Shelly Plus Plug UK** (Gen2, stable firmware 2.0.3), since
-  31 October. The bridge can read it (`X100_PLUG_MQTT`, below), once Nick's bridge.env has the lines.
+  31 October. The bridge has read it (`X100_PLUG_MQTT`, below) since 17 November.
   - It's set to switch its output on at start-up (`initial_state`), and on again 2 minutes after
     any off (`auto_on`). Its cloud link and its own setup network are off, and an admin password
     is set.
@@ -162,7 +162,8 @@ the wall.
   - **When the Pi has been up for less than 300 s:** starts the same way, since the Pi and the
     projector may have shared the power cut.
   - **In standby:** asks only the power query, every 2 s (`X100_POWER_CHECK_SECONDS`; Nick's
-    bridge.env sets 3600 for the week of watching), and asks the rest only when a command comes.
+    bridge.env sets 3600; with `X100_PLUG_STATE` and fresh readings from the plug, there are none),
+    and asks the rest only when a command comes.
     When it's on, the same check runs between the 30 s polls. Each check waits 2 s for its answer
     (`power_check_wait`), and silence counts as a cut only after two unanswered tries in a row
     (`power_check_tries`), so one missed reply isn't taken for one. A cut of more than a few
@@ -350,8 +351,8 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
   Terminal panel, as `ssh -t x100-controller@x100-pi.local 'sudo rm -rf x100-control && unzip -q
   x100-control.zip && cd x100-control && sudo deploy/install.sh'`, and he types the password there.
   It ends with `Installed: … (build <id>, …)` and `Connection to x100-pi.local closed.`
-- **Tags so far:** `build-94bd0861`, `build-e776ca5b`, `build-df034892`, `build-91c5549f` and
-  `build-bbc37ab4`, the build installed since 2 November.
+- **Tags so far:** `build-94bd0861`, `build-e776ca5b`, `build-df034892`, `build-91c5549f`,
+  `build-bbc37ab4` and `build-2d0dd24e`, the build installed since 17 November.
 
 ## Working with Nick
 
@@ -378,29 +379,28 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
 - The old private repo, `nicholasaross/x100-control-private`, is archived. Don't push to it. The
   merge messages for "pull request #1" and "#2" in `main`'s early history refer to PRs there.
 
-## Open items (as of 2026-11-16)
+## Open items (as of 2026-11-17)
 
-- **Watching the standby hangs, since 17:06 on 2 November.** By 16 November it had hung in 4 of 16
-  standby periods (7 November at 20:20, 8 November at 15:40, 9 November at 07:56 and 16 November at
-  17:26). From 18 to 27 October, at one check every 2 s, it was 4 of 9. So the hourly checks and the
-  CEC changes didn't stop it. In effect throughout:
-  - build bbc37ab4, installed at 17:48
-  - `X100_POWER_CHECK_SECONDS=3600` in bridge.env, so in standby the bridge asks "power?" about
-    once an hour, not every 2 s
-  - the Fire TV stick removed, and the Roku's "1-touch play" off, which cuts CEC traffic
-
-  Next, with Nick's OK:
-  - Install the plug reading (pull requests 11 and 14) and turn on `X100_PLUG_STATE`, so the bridge
-    asks nothing after an "off". If the bridge's own "off"s then stop being followed by hangs, the
-    questions just after them matter. If not, the projector does it by itself: look next at its
-    firmware and its standby settings. RS-232 control has to stay on.
+- **Watching the standby hangs.** From 17:06 on 2 November to 17 November it hung in 5 of 18
+  standby periods (7, 8, 9, 16 and 17 November), with build bbc37ab4, hourly checks
+  (`X100_POWER_CHECK_SECONDS=3600`), and the CEC traffic cut (the Fire TV stick removed, the
+  Roku's "1-touch play" off). From 18 to 27 October, at one check every 2 s, it was 4 of 9. So
+  neither change stopped it.
+  - **The next phase, since 16:53 on 17 November:** build 2d0dd24e, with `X100_PLUG_MQTT=127.0.0.1:1884`,
+    `X100_PLUG_PREFIX=x100-plug`, `X100_PLUG_STATE=true` and `X100_POWER_UP_QUIET_SECONDS=60` added
+    to bridge.env (the old one is kept beside it, as `bridge.env.bak-20261117-164935`). While the
+    plug's readings are fresh, the bridge asks the projector nothing in standby, and nothing after an
+    "off". It still sends its own serial "off", which since 18 October has been followed by a hang
+    4 times in 6, against 5 times in 22 for other "off"s. If hangs after the bridge's "off" carry on,
+    the serial "off" itself is the suspect; if they stop, the questions after it were. If the other
+    "off"s still hang too, the projector does it by itself: look next at its firmware and its
+    standby settings. RS-232 control has to stay on.
   - At the next hang, read the plug before anyone power-cycles it (MQTT, above), then try the
     remote twice, about 70 s apart.
-  - Shorten the wait after the power returns from 300 s to 60 s: add
-    `X100_POWER_UP_QUIET_SECONDS=60` to bridge.env by hand. That's the longest boot after a
-    power-up seen so far (53 s) and a few seconds more. When the wait ends the bridge asks
-    everything at once, so this is when the first questions arrive. The evidence, in seconds after
-    the power returns:
+  - The 60 s wait after the power returns, in place of 300 s: the longest boot after a power-up
+    seen so far (53 s) and a few seconds more. When the wait ends the bridge asks everything at
+    once, so this is when the first questions arrive. The evidence, in seconds after the power
+    returns:
     - 0–30: only the power query answers, and questions every second from the start hung it twice.
       On 17 November it was still answering only the power query at 34 s.
     - 0–53: the boot shows in the plug's watts. On 9 November: a peak of 19.6 W at 33 s, then a
@@ -419,43 +419,37 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
     60 s after it does, then start the projector with its remote.
 
   To count them:
-  - Count the "acknowledged power on but hasn't started" lines in `journalctl -u x100-bridge`.
-    Each says how long it had been in standby, how it got there and what was asked meanwhile.
-  - Count the standby periods: the `projector: … -> OFF` or `-> COOLING` lines. A remote start
-    from standby isn't seen by the bridge, but the plug's recording (below) shows every start.
-  - The daily `in the last 24 h:` lines give the totals.
-  - Meanwhile, a cut of a few seconds between hourly checks goes unseen, so a command within 5
-    minutes of one could hang it: the hazard the 2 s checks were for.
+  - `journalctl -u x100-bridge | grep "standby period:"`: one line per standby period, saying how
+    and when it began, what was asked meanwhile, and how it ended (started, hung, or a cut).
+  - The `plug:` lines show every start and "off", by the bridge or not, and each "on" a hang ignored.
+  - The daily `in the last 24 h:` lines give the totals, hangs included.
 - **A recording of the plug, on the Pi.** Since 20:11 on 8 November, a read-only `mosquitto_sub`,
   run as x100-controller, has added every message from the plug to `~/plug-capture.log`, about
   1 MB a day. It shows every start and "off", however made, and each fan run. It doesn't survive a
   restart of the Pi. Stop it with `pkill -u x100-controller mosquitto_sub`, and delete the log only
   with Nick's OK.
-  - The `x100-plug-recorder` service replaces it, once installed with the plug lines in bridge.env:
+  - The `x100-plug-recorder` service has replaced it since 16:53 on 17 November:
     `journalctl -u x100-plug-recorder` has every message, one line each, and it survives restarts.
-    Then the old one can stop, with Nick's OK.
+    The old one can stop, with Nick's OK.
 - **install.sh leaves a root-owned cache file in the unpacked release folder.** Its package check
   runs Python as root from that folder, which also means the check imports the unpacked copy, not
   the installed one. Until that's fixed, the install step uses `sudo rm`.
-- **Merged but not installed:** reading the plug (pull request 11), the spoken replies (13), and
-  telling on from standby by the plug's watts (14). The week of watching is over, so they wait only
-  for Nick's OK. Pull request 15 should go with them once it's merged: without it, a plug that drops
-  off its broker for a moment counts as a power cut.
-- **The bridge can read the plug, once Nick installs it.** It sees the plug's off and on, and
-  its restarts, so a cut between hourly checks is no longer missed.
+- **The bridge has read the plug since 17 November.** It sees the plug's off and on, its restarts,
+  and the projector being unplugged from it, so a cut between hourly checks is no longer missed.
   - Why: on 7 November it hung in standby, and Nick power-cycled it with the plug's button, off for
     about 30 s. With hourly checks the bridge saw nothing, so an "on" while it booted would have gone
     straight to it. His "on" came 1.5 to 5 minutes later, and worked. On 2 November a restart of the
     plug for a settings change went unseen the same way.
-  - Nick's bridge.env needs `X100_PLUG_MQTT=127.0.0.1:1884` and `X100_PLUG_PREFIX=x100-plug` added
-    by hand: install.sh keeps it as it is.
   - Still possible later, with Nick's agreement and tests: power-cycling a hang.
-- **Telling on from standby by the plug's watts (`X100_PLUG_STATE`), from pull request 14.** It tests
-  the idea that the questions just after an "off" hang it: a week with it on, and still hanging,
-  would point at the projector itself.
+- **Telling on from standby by the plug's watts (`X100_PLUG_STATE`), on since 17 November.** It tests
+  the idea that the questions just after an "off" hang it (above).
   - The 25 W and 50 W bands hold against the starts and "off"s recorded from 8 to 16 November (its
     draw, above).
-  - Needs the plug lines in bridge.env too, and `X100_PLUG_STATE=true`.
+- **A late answer in standby, 17 November.** At 16:53:54 the first reading after the restart for the
+  new build got 9 bytes after its question about the input had timed out (600 ms): a reply worth 6.
+  So its standby may answer "input?" slowly, rather than not at all. If more appear (`nobody was
+  waiting for` in the log), a long wait for that answer could read standby as on: the standby recheck
+  waits 2 s (`confirm_input_wait`). With `X100_PLUG_STATE` and fresh readings there are no rechecks.
 - **A crash between 16 and 18 October** happened before the journal was persistent. Nick doesn't
   remember the details, so it can't be placed.
 - **Untested: a serial "on" from the standby that looks on** after a power cut. Until it's known to
