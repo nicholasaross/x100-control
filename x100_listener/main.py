@@ -116,6 +116,17 @@ def dry_run(phrase: Phrase) -> Result:
     return Result(True, "DRY_RUN", f"would send {phrase.describe()}")
 
 
+def reply_said(reply: str, sound: str) -> str:
+    """What the listener played in answer, for its log."""
+    if sound == "spoken" and reply in LINES:
+        return f'said "{LINES[reply]}"'
+    if sound.startswith("nothing"):
+        return f"played {sound}"
+    if sound:
+        return f"played {sound}" + (f" (for {reply})" if not sound.endswith(f" {reply} chime") else "")
+    return f"reply: {reply}"
+
+
 def describe(event: Event) -> str:
     d = event.detail
     if event.kind == "wake":
@@ -126,7 +137,10 @@ def describe(event: Event) -> str:
     if event.kind == "result":
         if d.get("outcome") == "dry run, nothing sent":
             return "  (dry run: nothing sent to the bridge)"
-        return f"  bridge: {d['outcome']}, {d['bridge_ms']} ms from hearing the command to the bridge's answer"
+        text = f"  bridge: {d['outcome']}, {d['bridge_ms']} ms from hearing the command to the bridge's answer"
+        if d.get("reply"):
+            text += "; " + reply_said(d["reply"], d.get("sound", ""))
+        return text
     if event.kind == "timeout":
         return f"no command within {d['waited']:.1f} s of the wake word"
     return f"{event.kind}: {d}"

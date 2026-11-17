@@ -217,9 +217,12 @@ class Listener:
             except Exception as exc:  # a dispatcher bug must not kill the listener
                 log.exception("dispatch failed")
                 result = Result(False, "LISTENER_ERROR", str(exc))
+            reply = reply_for(result, phrase.ops)
+            sound_for = getattr(self.chimes, "sound_for", None)  # a remote speaker may not say
             self._emit("result", t, phrase=phrase.text.lower(), ok=result.ok, outcome=result.describe(),
-                       bridge_ms=round(result.seconds * 1000), total_ms=round((self.clock() - heard_at) * 1000))
-            self.chimes.play(reply_for(result, phrase.ops))
+                       bridge_ms=round(result.seconds * 1000), total_ms=round((self.clock() - heard_at) * 1000),
+                       reply=reply, sound=sound_for(reply) if sound_for is not None else "")
+            self.chimes.play(reply)
 
         self.run(job)
 

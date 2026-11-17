@@ -381,6 +381,22 @@ included, works against the simulator. (`--port 4661` instead simulates the LAN 
   power (see above).
 * **Audio** stays in the Pi's memory and is dropped as it's processed. `SAVE_CLIPS_DIR` is the only
   thing that writes audio to disk, and it keeps the newest 500 clips.
+* **The log** (`journalctl -u x100-bridge -u x100-listener`) says what happened, and why:
+  * `projector: OFF -> WARMING (the bridge sent 'on')`: each change in what the bridge believes.
+  * `serial (command power=ON): power? on (31 ms) · 'on' ok (45 ms)`: what it asked the projector,
+    and what came back, unless the projector is simply on and nothing's happening.
+  * `plug: the projector came on: a dip to 6.8 W at 07:25:16, then 92 W 15 s later; 2 s after the
+    bridge's 'on'`: what its draw shows, with a plug. Also its "off"s, presses of its remote that
+    didn't start it, an "on" it ignored, steps in its standby draw, and how long it took to boot when
+    its power came back.
+  * `standby period: 2.4 h from 10:53:56 on 17 Nov (the bridge switched it off; …); ended by …`:
+    one line as each standby ends, with what was asked meanwhile, and whether it then started or hung.
+  * `bridge: ok, 3714 ms …; played the ok chime`: what the listener heard, the bridge's answer, and
+    what you heard back.
+  * `in the last 24 h: …`: once a day, the totals, including hangs and what the plug saw.
+* **The plug recorder,** with a plug: the `x100-plug-recorder` service writes a line for every reading
+  the plug sends (watts, volts, amps), about 2,500 a day, even while the bridge is stopped:
+  `journalctl -u x100-plug-recorder --since today`. It only reads.
 
 ## Privacy
 
@@ -446,10 +462,11 @@ listener running on a Linux machine. The listener only sees an `AudioSource` and
 ```
 x100/             projector library: protocol, serial/TCP transports, PJLink, simulator, x100ctl
 x100_bridge/      the bridge: command handling and state (core.py), local HTTP API (local_api.py),
-                  the optional smart plug on the projector's mains (plug.py)
+                  the optional smart plug on the projector's mains (plug.py), and what its draw
+                  says the projector did, for the log (plugwatch.py)
 x100_listener/    the listener: audio in, wake word, command spotter, state machine, chimes and spoken
                   replies, CLI
-deploy/           install.sh, systemd units, settings examples
+deploy/           install.sh, systemd units (the bridge, the listener, the plug recorder), settings examples
 tools/            check-pi-wheels.sh: checks every listener package has a 64-bit ARM build;
                   make_release.py: builds the zip and stamps its build ID
 alexa/            the optional Alexa route: Lambda, CloudFormation, deploy and teardown scripts

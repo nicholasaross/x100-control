@@ -81,6 +81,9 @@ class NullChimes:
     def play(self, kind: str) -> None:
         log.debug("chime %s (chimes are off)", kind)
 
+    def sound_for(self, kind: str) -> str:
+        return "nothing: chimes are off"
+
     def busy(self) -> bool:
         return False
 
@@ -103,6 +106,10 @@ class SoundDeviceChimes:
     def use_clips(self, clips: Dict[str, np.ndarray]) -> None:
         """Spoken replies, by name, already at this speaker's sample rate (replies.load_clips)."""
         self._clips = dict(clips)
+
+    def sound_for(self, kind: str) -> str:
+        """What play(kind) plays, for the log: "spoken", or the chime it falls back to."""
+        return "spoken" if kind in self._clips else f"the {chime_for(kind)} chime"
 
     def play(self, kind: str) -> None:
         sound = pick_sound(kind, self._clips, self._tones)

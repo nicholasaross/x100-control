@@ -70,6 +70,66 @@ def parse_switch_status(payload: bytes) -> Optional[PlugStatus]:
                       switch_ons)
 
 
+def format_message(topic: str, payload: bytes, retained: bool = False) -> str:
+    """One message from the plug, as one line for the record (see record): its status in KEY=VALUE form, or
+    anything else as it came. ``topic`` is without the plug's prefix."""
+    tail = " (retained)" if retained else ""
+    if topic == "online":
+        return f"online {payload.decode('utf-8', 'replace').strip()}{tail}"
+    if topic == "status/switch:0":
+        try:
+            doc = json.loads(payload)
+        except (ValueError, UnicodeDecodeError):
+            doc = None
+        if isinstance(doc, dict) and isinstance(doc.get("output"), bool):
+            counts = doc.get("counts") if isinstance(doc.get("counts"), dict) else {}
+            temp = doc.get("temperature") if isinstance(doc.get("temperature"), dict) else {}
+            fields = [("output", "on" if doc["output"] else "off"), ("watts", doc.get("apower")),
+                      ("amps", doc.get("current")), ("volts", doc.get("voltage")), ("source", doc.get("source")),
+                      ("switch_on", counts.get("switch_on")), ("celsius", temp.get("tC"))]
+            return "switch:0 " + " ".join(f"{k}={v}" for k, v in fields if v is not None) + tail
+    return f"{topic} {payload[:300].decode('utf-8', 'replace')}{tail}"
+
+
+def record(broker: str, prefix: str, write: Callable[[str], None], stop: threading.Event) -> None:
+    """Write a line for every message the plug sends (``<prefix>/#``) until ``stop`` is set, for looking back on:
+    each start, "off", press, boot and fan run shows in its watts, even while the bridge is stopped. It only
+    subscribes. ``x100-bridge --record-plug`` runs it, as the x100-plug-recorder service."""
+    import paho.mqtt.client as mqtt
+
+    prefix = prefix.strip().strip("/")
+    if not prefix:
+        raise ValueError("X100_PLUG_MQTT is set, but X100_PLUG_PREFIX isn't: set it to the plug's MQTT prefix")
+    host, port = parse_broker(broker)
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="x100-plug-recorder-" + uuid.uuid4().hex[:8],
+                         clean_session=True, protocol=mqtt.MQTTv311)
+
+    def on_connect(client, userdata, flags, reason_code, properties=None) -> None:
+        if reason_code.is_failure:
+            write(f"recorder: the broker at {host}:{port} said {reason_code}")
+            return
+        client.subscribe(f"{prefix}/#", qos=1)
+        write(f"recorder: recording {prefix}/# from {host}:{port}")
+
+    def on_disconnect(client, userdata, flags, reason_code, properties=None) -> None:
+        if not stop.is_set():
+            write(f"recorder: lost the broker ({reason_code}): trying again")
+
+    def on_message(client, userdata, msg) -> None:
+        topic = msg.topic[len(prefix) + 1:] if msg.topic.startswith(prefix + "/") else msg.topic
+        write(format_message(topic, msg.payload, msg.retain))
+
+    client.on_connect, client.on_disconnect, client.on_message = on_connect, on_disconnect, on_message
+    client.reconnect_delay_set(min_delay=1, max_delay=60)
+    client.connect_async(host, port, keepalive=60)
+    client.loop_start()
+    try:
+        stop.wait()
+    finally:
+        client.disconnect()
+        client.loop_stop()
+
+
 class PlugWatcher:
     """Subscribes to the plug's status and passes it on: ``on_status(output, watts, source, switch_ons)`` for
     each reading, and ``on_reconnected()`` when the plug reconnects to the broker, which it does after a restart,

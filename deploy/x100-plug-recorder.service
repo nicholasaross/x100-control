@@ -1,0 +1,28 @@
+# systemd unit that records every message from the projector's smart plug: its watts, volts and amps,
+# about once a minute and on every change, so each start, "off", press, boot and fan run can be looked
+# back on, even while the bridge is stopped. It only reads: it publishes nothing, and never switches
+# the plug. With no plug set in bridge.env (X100_PLUG_MQTT), it stops at once and does nothing.
+# deploy/install.sh installs it with the bridge.
+#   journalctl -u x100-plug-recorder --since today        # read it (about 2,500 lines a day)
+[Unit]
+Description=X100-4K plug recorder (every reading from the projector's smart plug)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=x100
+Group=x100
+WorkingDirectory=/opt/x100-control
+ExecStart=/opt/x100-control/.venv/bin/x100-bridge --env-file /opt/x100-control/bridge.env --record-plug
+Restart=on-failure
+RestartSec=30
+IPAddressDeny=any
+IPAddressAllow=localhost link-local 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 fc00::/7
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

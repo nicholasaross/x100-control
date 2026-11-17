@@ -19,7 +19,8 @@ changing anything.
 - `deploy/install.sh` puts the code in `/opt/x100-control`, with a Python 3.11 venv in `.venv`.
 - Settings live in `/opt/x100-control/bridge.env` and `listener.env`. They hold the API token, so
   they never go in the repo, and neither do certs/, models/, clips/ or config/inputs.json.
-- Logs: `journalctl -u x100-bridge -u x100-listener -f` on the Pi.
+- Logs: `journalctl -u x100-bridge -u x100-listener -f` on the Pi. Every reading from the plug is in
+  `journalctl -u x100-plug-recorder` (below).
   - Since 18 October they survive reboots, through `/etc/systemd/journald.conf.d/50-persistent.conf`
     (`Storage=persistent`, `SystemMaxUse=200M`). Raspberry Pi OS otherwise keeps them in memory only,
     which is how the logs of a crash between 16 and 18 October were lost.
@@ -65,7 +66,10 @@ changing anything.
 - `x100_bridge/`:
   - `core.py`: `BridgeCore`, which holds state, deferral, polling and all the power rules below.
   - `local_api.py`: the HTTP API.
-  - `plug.py`: reads the plug's MQTT status, and passes it to `BridgeCore`. It never publishes.
+  - `plug.py`: reads the plug's MQTT status, and passes it to `BridgeCore`. It never publishes. Also the
+    plug recorder (`x100-bridge --record-plug`).
+  - `plugwatch.py`: what the projector's draw says it did, for the log only: starts, offs, presses,
+    boots, and what came of the bridge's own "on" and "off".
   - `main.py`.
 - `x100_listener/`:
   - `listener.py`: a pure state machine.
@@ -190,9 +194,31 @@ the wall.
     that second reading. Otherwise one slow answer would stick, as standby means power checks only.
   - **Says what came before a hang.** "Acknowledged power on but hasn't started" now adds how long it
     had been in standby, how it got there (the bridge, its remote or itself, or a cut), and how many
-    power checks, unanswered ones and full readings the bridge made meanwhile.
+    power checks, unanswered ones and full readings the bridge made meanwhile. An "on" that doesn't
+    start it leaves it in the same standby, so a second try says the same.
+  - **Logs the serial traffic in words, unless it's simply on:** `serial (power check): power? on
+    (35 ms)`, `serial (command power=OFF): power? on (31 ms) · input? 0x03 (40 ms) · 'off' ok
+    (45 ms)`. One line per poll, check or command, just before any change it leads to. Not the polls
+    while it's on and nothing's happening, nor standby checks less than 60 s apart
+    (`SERIAL_CHECKS_LOGGED_FROM`), which would be thousands a day. Bytes it sends unasked are logged
+    too (`the projector sent … bytes nobody was waiting for`), as is a retry on a reopened link.
+  - **Logs what the projector's draw says it did,** with a plug (`plugwatch.py`), as `plug: …` lines:
+    each start and "off", and whether the bridge caused it (within 10 s of its "on" or "off"); a press
+    that reached it without starting it (the dip with no start, as on 16 November); an "on" or "off"
+    it ignored; and each boot when its power came back, and how long it took. It acts on none of it.
+    - Also steps in its standby draw: minutes after 4 of 8 remote "off"s (8 to 17 November), it dipped
+      from about 11.3 W to 9-10 W, then sat at about 10.5 W (or went back to 12-13 W). Nothing pressed
+      anything. A press draws over 16 W within 20 s of its dip; a step doesn't. Not a sign of a hang:
+      none came in the 3 standbys that hung, but none came in 4 of the 8 that didn't either.
+    - Replayed over the plug's readings from 8 to 17 November, it found the 11 starts and 12 "off"s
+      with the right cause, the 5 "on"s a hang ignored, the one press, 5 steps and 3 boots.
+  - **Logs each standby period as it ends:** `standby period: 2.4 h from 10:53:56 on 17 Nov (the
+    bridge switched it off; its draw fell at 10:53:58); meanwhile 3 power checks (0 unanswered), 2 full
+    readings (at +7 s, +2.4 h), 1 commands; ended by the bridge's 'on': it was acknowledged, but the
+    projector didn't start`. With the plug, its own start and "off" times are used, so remote ones count too.
   - **Once a day (`summary_seconds`), logs what it asked and missed:** `in the last 24 h: … power
-    checks (… unanswered), … full readings, … commands, … outages; OFF … h, ON … h`.
+    checks (… unanswered), … full readings, … commands, … outages, … hangs; the plug saw … starts (…
+    by the bridge), … offs (… by the bridge), …; OFF … h, ON … h`.
   - **Reads the plug, if `X100_PLUG_MQTT` and `X100_PLUG_PREFIX` are set.** It subscribes to
     `<prefix>/status/switch:0` and `<prefix>/online`, and only reads.
     - While the plug's output is off, it sends nothing, and refuses commands saying so. When the
@@ -230,7 +256,8 @@ the wall.
     - A start by its remote is seen from the watts, and starts the 120 s hold.
     - With no reading for 180 s (`plug_stale_seconds`; the plug sends one about once a minute), it
       asks the projector as without the plug, and logs that. It logs again when the readings are back.
-    - The daily line and the hang line count the readings from the plug. (`X100_START_HOLD_SECONDS`):** sends no power command. An "off"
+    - The daily line and the hang line count the readings from the plug.
+  - **For 120 s after a start (`X100_START_HOLD_SECONDS`):** sends no power command. An "off"
     waits, and a repeated "on" isn't sent.
   - **Never resends "on" by itself.** 2 s after "on" it checks whether volume still answers. If it
     does, the projector is still in standby, and the bridge reports that it hasn't started.
@@ -259,6 +286,7 @@ the wall.
   pace, with a little growl and gravel ("gruff"; the "sillier" 6.5 semitones was too much).
   - The bridge gives each refusal a `reason` ("plug_off", "booting", …: `BridgeError`), and the
     listener picks the line from that, or from the code when there's no reason.
+  - Its log says what it played after each command: `said "It didn't start. …"`, or the chime.
   - Clips are made once by `x100-listener --make-replies`, which install.sh runs. It fetches the
     voice first (80 MB, checksummed, unpacked only inside its own folder). They're named by a hash
     of the line, voice and effect, so changing any of them makes fresh clips at the next install.
@@ -403,6 +431,9 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
   1 MB a day. It shows every start and "off", however made, and each fan run. It doesn't survive a
   restart of the Pi. Stop it with `pkill -u x100-controller mosquitto_sub`, and delete the log only
   with Nick's OK.
+  - The `x100-plug-recorder` service replaces it, once installed with the plug lines in bridge.env:
+    `journalctl -u x100-plug-recorder` has every message, one line each, and it survives restarts.
+    Then the old one can stop, with Nick's OK.
 - **install.sh leaves a root-owned cache file in the unpacked release folder.** Its package check
   runs Python as root from that folder, which also means the check imports the unpacked copy, not
   the installed one. Until that's fixed, the install step uses `sudo rm`.

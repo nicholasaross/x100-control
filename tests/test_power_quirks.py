@@ -1536,7 +1536,9 @@ def test_without_fresh_readings_from_the_plug_it_asks_the_projector_as_before(x1
         plug.sending.set()
         assert wait_for(lambda: core._by_watts, limit=2)
         assert any(m.startswith("no reading from the projector's plug for ") for m in said(caplog))
-        assert sum(m.startswith("telling on from standby by what the projector draws") for m in said(caplog)) == 2
+        # The flag changes a moment before the line is logged: wait for the line itself.
+        assert wait_for(lambda: sum(m.startswith("telling on from standby by what the projector draws")
+                                    for m in said(caplog)) == 2, limit=2)
         assert core.submit_and_wait(ON)["ok"]
         assert x100.state.log[heard + 1] == "W 11 00 00"  # by its watts again: nothing asked first
     finally:
