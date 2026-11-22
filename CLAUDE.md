@@ -450,7 +450,9 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
     about 30 s. With hourly checks the bridge saw nothing, so an "on" while it booted would have gone
     straight to it. His "on" came 1.5 to 5 minutes later, and worked. On 2 November a restart of the
     plug for a settings change went unseen the same way.
-  - Still possible later, with Nick's agreement and tests: power-cycling a hang.
+  - Still possible later, with Nick's agreement and tests: power-cycling a hang. The design for it,
+    for Nick's review, is in `docs/plug-backstop.md`: its rules, what you'd hear, the plug and broker
+    changes it needs, and its open questions. None of it is built.
 - **Telling on from standby by the plug's watts (`X100_PLUG_STATE`), on since 17 November.** It tests
   the idea that the questions just after an "off" hang it (above).
   - The 25 W and 50 W bands hold against the starts and "off"s recorded from 8 to 16 November (its
