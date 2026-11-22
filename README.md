@@ -476,6 +476,7 @@ deploy/           install.sh, systemd units (the bridge, the listener, the plug 
 tools/            check-pi-wheels.sh: checks every listener package has a 64-bit ARM build;
                   make_release.py: builds the zip and stamps its build ID
 alexa/            the optional Alexa route: Lambda, CloudFormation, deploy and teardown scripts
+docs/             designs for review: plug-backstop.md (power-cycling a hung projector through its plug)
 tests/            see tests/README.md
 Dockerfile, docker-compose.yml    the bridge in Docker, for the LAN layout
 ```
