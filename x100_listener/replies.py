@@ -42,6 +42,15 @@ LINES: Dict[str, str] = {
     "unreachable": "Can't reach the projector. Is it plugged in?",
     "projector_off": "It's switched off, mate.",
     "refused": "The projector said no.",
+    # From the backstop, which restarts a hung projector at the wall, through its plug (x100_bridge/core.py).
+    "restarting": "It's hung, so I'm restarting it at the wall. It'll come on in two or three minutes.",
+    "restart": "Righto. Restarting it at the wall. It'll come on in two or three minutes.",  # as asked
+    "restart_busy": "It's restarting. Give it a couple of minutes.",
+    "restart_on": "It's on, so I won't cut its power. Switch it off first.",
+    "restart_wait": "It's only just been switched. Try again in a couple of minutes.",
+    "restart_unable": "I can't restart it from here. Switch it off at the wall.",
+    "restart_failed": "I restarted it, but it still wouldn't start. It needs switching off at the wall.",
+    "hung_again": "It's hung again. Switch it off at the wall this time.",
     "bridge_down": "Can't reach the bridge. Is it running?",
     "fail": "That didn't work. Have a look at the log.",
 }
@@ -64,14 +73,15 @@ Synth = Callable[[str, float], Tuple[int, np.ndarray]]  # (text, speed) -> (samp
 
 
 def reply_for(result: Result, ops: Sequence[Dict[str, Any]]) -> str:
-    """What to play for the bridge's answer: a chime's name ("ok"), or a spoken reply's."""
+    """What to play for the bridge's answer: a chime's name ("ok"), or a spoken reply's. The bridge's own word
+    for it comes first, whether it's ok or not: "restarting", say, for an "on" that found it hung."""
+    if result.reason in LINES:
+        return result.reason
     if result.ok:
         if not result.deferred:
             return "ok"
         power = next((str(o.get("value")).upper() for o in ops if o.get("op") == "power"), "")
         return {"OFF": "queued_off", "ON": "queued_on"}.get(power, "queued")
-    if result.reason in LINES:
-        return result.reason
     if result.code == "BRIDGE_UNREACHABLE":
         return "bridge_down"
     if result.code == "ENDPOINT_UNREACHABLE":

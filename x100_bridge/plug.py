@@ -7,16 +7,26 @@ leaves the projector alone while the plug's output is off, and for a while after
 (X100_POWER_UP_QUIET_SECONDS: see Config in core.py). With X100_PLUG_STATE, it also tells on from standby by the watts,
 and asks the projector nothing but what a command needs.
 
-It only reads: it subscribes to the plug's status and publishes nothing, so it can't switch the
-plug, and nothing is sent to the projector because of it. If the broker can't be reached, the
-bridge carries on as it would without a plug.
+Reading it (PlugWatcher) only subscribes to the plug's status and publishes nothing, and nothing is
+sent to the projector because of it. If the broker can't be reached, the bridge carries on as it
+would without a plug.
 
-    X100_PLUG_MQTT=127.0.0.1:1883        the broker, host:port (no sign-in)
+    X100_PLUG_MQTT=127.0.0.1:1883        the broker, host:port (reading needs no sign-in)
     X100_PLUG_PREFIX=shellyplusplug-...  the plug's MQTT prefix (its settings: MQTT > MQTT prefix)
 
 Turn on "Generic status update over MQTT" in the plug's MQTT settings. It then publishes
 ``<prefix>/status/switch:0`` on every change and about once a minute, and ``<prefix>/online``
 when it connects (and the broker publishes ``false`` there when it drops out).
+
+Switching it (PlugSwitch) is only for the backstop, which power-cycles a hung projector
+(X100_PLUG_BACKSTOP: see Config in core.py, and docs/plug-backstop.md). It needs the plug's "MQTT
+control" turned on, and a broker login of the bridge's own that may publish to
+``<prefix>/command/switch:0`` and nothing else:
+
+    X100_PLUG_CONTROL_USER=x100-bridge   that login
+    X100_PLUG_CONTROL_PASSWORD=...
+
+It only ever sends ``on`` and ``off`` there, never retained.
 """
 
 from __future__ import annotations
@@ -215,3 +225,81 @@ class PlugWatcher:
                 log.debug("ignoring a plug status that isn't one: %r", msg.payload[:200])
                 return
             self.on_status(status.output, status.watts, status.source, status.switch_ons)
+
+
+class PlugSwitch:
+    """Switches the plug's output, for the backstop: ``switch(False)`` publishes ``off`` to
+    ``<prefix>/command/switch:0`` (the plug's MQTT control), and ``switch(True)`` publishes ``on``. It signs in
+    to the broker with a login of its own, kept apart from the reading, so a wrong login stops only the
+    switching. Whether a switch worked shows in the plug's next reading, as the broker doesn't say when it drops
+    a message the login may not send: the bridge goes by that reading."""
+
+    def __init__(self, broker: str, prefix: str, user: str, password: str):
+        import paho.mqtt.client as mqtt  # here, so that a bridge without a plug never needs it
+
+        prefix = prefix.strip().strip("/")
+        if not prefix:
+            raise ValueError("X100_PLUG_MQTT is set, but X100_PLUG_PREFIX isn't: set it to the plug's MQTT prefix")
+        if not user:
+            raise ValueError("X100_PLUG_CONTROL_USER isn't set: the bridge needs a broker login to switch the plug")
+        self.host, self.port = parse_broker(broker)
+        self.topic = f"{prefix}/command/switch:0"
+        self.user = user
+        self.ready = threading.Event()  # signed in to the broker
+        self._said_unreachable = False
+        self._success = mqtt.MQTT_ERR_SUCCESS
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                                  client_id="x100-bridge-switch-" + uuid.uuid4().hex[:8],
+                                  clean_session=True, protocol=mqtt.MQTTv311)
+        self.client.username_pw_set(user, password)
+        self.client.on_connect = self._on_connect
+        self.client.on_connect_fail = self._on_connect_fail
+        self.client.on_disconnect = self._on_disconnect
+        self.client.reconnect_delay_set(min_delay=1, max_delay=60)
+
+    def describe(self) -> str:
+        return f"MQTT {self.host}:{self.port}, {self.topic}, signed in as {self.user}"
+
+    def start(self) -> None:
+        self.client.connect_async(self.host, self.port, keepalive=60)
+        self.client.loop_start()
+
+    def stop(self) -> None:
+        self.client.disconnect()
+        self.client.loop_stop()
+
+    def can_switch(self) -> bool:
+        return self.ready.is_set()
+
+    def switch(self, on: bool) -> bool:
+        """Tell the plug to switch its output on or off. False if it can't be sent (not signed in)."""
+        if not self.ready.is_set():
+            return False
+        info = self.client.publish(self.topic, "on" if on else "off", qos=1, retain=False)
+        return info.rc == self._success
+
+    def _unreachable(self, why: Any) -> None:
+        if not self._said_unreachable:  # once, until it signs in: it keeps trying meanwhile
+            self._said_unreachable = True
+            log.warning("can't sign in to the plug's broker at %s:%d as %s, to switch the plug (%s): the backstop "
+                        "can't restart the projector until it can. Trying again now and then", self.host, self.port,
+                        self.user, why)
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
+        if reason_code.is_failure:
+            self._unreachable(f"the broker said {reason_code}")
+            return
+        self._said_unreachable = False
+        self.ready.set()
+        log.info("able to switch the projector's plug, for the backstop: %s", self.describe())
+
+    def _on_connect_fail(self, client, userdata) -> None:
+        self._unreachable("no answer")
+
+    def _on_disconnect(self, client, userdata, flags, reason_code, properties=None) -> None:
+        if not self.ready.is_set():
+            return
+        self.ready.clear()
+        if reason_code != 0:  # not our own stop()
+            log.warning("lost the broker the bridge switches the plug through (%s): until it's back, the backstop "
+                        "can't restart the projector", reason_code)

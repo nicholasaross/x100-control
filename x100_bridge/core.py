@@ -17,6 +17,7 @@ Command message (local API, or Lambda -> bridge on ``x100/<thing>/cmd``)::
     volume_delta  signed int
     mute          true | false
     key           remote key code (int)
+    restart       (none): power-cycle it through its plug, then "on" (the backstop: see Config)
 
 Every command is answered by an ack that echoes the command id, together with
 the projector state after the command. The ack goes out as soon as the
@@ -35,7 +36,7 @@ import time
 import uuid
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from x100 import __version__
 from x100.inputs import InputMap
@@ -56,7 +57,7 @@ SERIAL_CHECKS_LOGGED_FROM = 60.0
 # or with this much of the wait left or less, "booting_minute" ("Give it a minute"): all of a 60 s wait.
 BOOTING_MINUTE_SECONDS = 90.0
 
-OP_KINDS = ("power", "input", "volume", "volume_delta", "mute", "key")
+OP_KINDS = ("power", "input", "volume", "volume_delta", "mute", "key", "restart")
 
 
 def system_uptime() -> Optional[float]:
@@ -166,6 +167,29 @@ class Config:
     plug_standby_watts: float = 25.0
     plug_follow_seconds: float = 90.0
     plug_stale_seconds: float = 180.0
+    # The backstop (plug_backstop, X100_PLUG_BACKSTOP; off by default; docs/plug-backstop.md): power-cycling a hung
+    # projector through its plug. When the bridge's own "on" hasn't started it 2 s later (volume still answers),
+    # and the plug's readings show no change at all in its draw by plug_cause_seconds after the "on", it's hung. The
+    # bridge then switches the plug off, and back on backstop_off_seconds later (the plug's own auto_on is the net:
+    # 2 minutes after it went off, on Nick's), leaves the projector alone as after any cut, reads it once, and sends
+    # "on" again from an ordinary standby. Also when asked ("restart the projector"), and then "on" afterwards too.
+    # Never while it draws more than plug_standby_watts, or has in the last backstop_calm_seconds, or while its draw
+    # is changing, or within start_hold_seconds of a start or an "off" its draw showed. Never without fresh readings
+    # from the plug, or a way to switch it (a broker login, plug_control_user). By itself, at most once per hang: if
+    # the "on" after it hangs too, it stops, and doesn't again until the projector has next started. Asking still
+    # works. A plug that doesn't report the switch within backstop_switch_seconds is given up on, and its "on" is
+    # sent again every backstop_switch_seconds until its power is back, for up to backstop_power_back_seconds. What
+    # it's doing is noted in state_dir, so that a bridge restarted in the middle of it still leaves the booting
+    # projector alone.
+    plug_backstop: bool = False
+    plug_control_user: str = ""
+    plug_control_password: str = ""
+    plug_cause_seconds: float = 10.0  # also how soon a start or an "off" counts as the bridge's (plugwatch.py)
+    backstop_off_seconds: float = 30.0
+    backstop_calm_seconds: float = 30.0
+    backstop_switch_seconds: float = 10.0
+    backstop_power_back_seconds: float = 180.0
+    state_dir: str = ""
     warmup_seconds: float = 90.0
     cooldown_seconds: float = 5.0
     settle_seconds: float = 15.0
@@ -236,6 +260,12 @@ class Config:
             plug_standby_watts=_env_float("X100_PLUG_STANDBY_WATTS", 25.0),
             plug_on_watts=_env_float("X100_PLUG_ON_WATTS", 50.0),
             plug_unplugged_watts=_env_float("X100_PLUG_UNPLUGGED_WATTS", 3.0),
+            plug_backstop=_env_bool("X100_PLUG_BACKSTOP", False),
+            plug_control_user=e("X100_PLUG_CONTROL_USER", "").strip(),
+            plug_control_password=e("X100_PLUG_CONTROL_PASSWORD", ""),
+            backstop_off_seconds=_env_float("X100_BACKSTOP_OFF_SECONDS", 30.0),
+            # systemd's StateDirectory= (deploy/x100-bridge.service) sets STATE_DIRECTORY
+            state_dir=e("X100_STATE_DIR", "") or e("STATE_DIRECTORY", "").split(":")[0],
             scenes=parse_scenes(e("X100_SCENES", "")),
             shadow_topic_prefix=e("SHADOW_TOPIC_PREFIX", "$aws/things"),
             local_api_bind=e("LOCAL_API_BIND", "127.0.0.1:8661"),
@@ -265,8 +295,10 @@ def parse_scenes(text: str) -> Dict[str, int]:
 class BridgeError(Exception):
     """An error with an Alexa ErrorResponse type attached. ``reason``, where there is one, says in a word what
     went wrong, for the listener to say so out loud (x100_listener/replies.py): "plug_off", "plug_checking",
-    "booting", "booting_minute", "unreachable", "not_started", "just_started", "looks_on", "projector_off" or
-    "refused"."""
+    "booting", "booting_minute", "unreachable", "not_started", "just_started", "looks_on", "projector_off",
+    "refused", and from the backstop, "restart_busy", "restart_on", "restart_wait", "restart_unable",
+    "restart_failed" or "hung_again". An answer that's ok can carry one too (see _ack): "restarting" (it was hung,
+    and is being restarted at the wall) or "restart" (as asked), and after a restart, the news of how it went."""
 
     def __init__(self, code: str, message: str, reason: str = ""):
         super().__init__(message)
@@ -309,9 +341,12 @@ class State:
 class BridgeCore:
     def __init__(self, cfg: Config, projector: Projector, inputs: InputMap,
                  publish: Callable[[Dict[str, Any]], None], pjlink: Optional[PJLink] = None,
-                 clock: Callable[[], float] = time.time, uptime: Optional[Callable[[], Optional[float]]] = None):
+                 clock: Callable[[], float] = time.time, uptime: Optional[Callable[[], Optional[float]]] = None,
+                 plug_switch: Optional[Any] = None):
         """``uptime``: how long this computer has been running (see system_uptime), so that a bridge
-        starting with the computer, perhaps after a mains cut, leaves a booting projector alone."""
+        starting with the computer, perhaps after a mains cut, leaves a booting projector alone.
+        ``plug_switch``: for the backstop, what switches the plug (plug.PlugSwitch): ``can_switch()``, and
+        ``switch(on)``, which says whether it could send it."""
         self.cfg = cfg
         self.proj = projector
         self.inputs = inputs
@@ -385,12 +420,37 @@ class BridgeCore:
         projector.on_exchange = self._heard_serial
         # What the projector's draw says it did (plugwatch.py), and the standby period now running: its start,
         # how it began and what the plug saw then, and when the full readings came (see _period_ended).
-        self._plug_watch = PlugWatch(cfg.plug_unplugged_watts, cfg.plug_standby_watts, cfg.plug_on_watts, self._stamp)
+        self._plug_watch = PlugWatch(cfg.plug_unplugged_watts, cfg.plug_standby_watts, cfg.plug_on_watts, self._stamp,
+                                     cfg.plug_cause_seconds)
         self._period_open = False
         self._period_cut = False                # it began with a power cut
         self._off_mono: Optional[float] = None  # when it began (time.monotonic)
         self._off_fell = ""                     # "its draw fell at 10:53:58"
         self._period_readings: List[float] = []  # seconds into the period of its first few full readings
+        # From the plug's readings, for the backstop's rules: since when the projector has drawn no more than in
+        # standby (None while it draws more), the last start and "off" its draw showed, and the bridge's last "on"
+        # that its draw showed no reaction to, or that there were no readings to tell.
+        self._plug_calm_since: Optional[float] = None
+        self._plug_start_at: Optional[float] = None
+        self._plug_off_at: Optional[float] = None
+        self._plug_ignored_on: Optional[float] = None
+        self._plug_unread_on: Optional[float] = None
+        # The backstop (see Config), which restarts a hung projector at the wall, through its plug.
+        self._switch = plug_switch
+        self._bs_state = ""            # "" (nothing doing), "verdict" (waiting for its draw to confirm a hang),
+        # "off_sent", "off", "on_sent" (the plug told to switch), "booting", "starting" (its "on" after), or "resume"
+        # (a bridge restarted in the middle of one, waiting for the plug's first reading)
+        self._bs_since = 0.0           # when it got there (time.monotonic)
+        self._bs_found = ""            # how this one began: "a hang", or "asked"
+        self._bs_found_at = 0.0        # and when (time.monotonic)
+        self._bs_on_at: Optional[float] = None  # the bridge's "on" that found the hang
+        self._bs_then_on = True        # "on" once it has restarted (not if "off" is asked meanwhile)
+        self._bs_sent_at = 0.0         # when it last told the plug to switch
+        self._bs_cut_at = 0.0          # when it told the plug to switch off, and when its power came back (wall
+        self._bs_back_at: Optional[float] = None  # clock), for its note (see _note)
+        self._bs_paused = ""           # it won't restart it by itself again until it has started: why
+        self._bs_news = ""             # how the last restart went, for the next command: "restart_failed", say
+        self._reply_reason = ""        # for the command being answered, when it's ok: "restarting", say
 
     # ------------------------------------------------------------------ intake
     def submit(self, payload: Any) -> None:
@@ -460,6 +520,15 @@ class BridgeCore:
             self._doubt_on = "this computer started"
             log.info("this computer started %.0f s ago, perhaps with the projector after a power cut: leaving the "
                      "projector alone until %s, as questions while it boots can hang it", up, self._quiet_end())
+        if self.cfg.plug_backstop:
+            if self._switch is None:
+                log.warning("X100_PLUG_BACKSTOP is set, but the bridge has no way to switch the projector's plug (it "
+                            "needs X100_PLUG_MQTT, X100_PLUG_PREFIX and X100_PLUG_CONTROL_USER): it won't restart the "
+                            "projector at the wall")
+            else:
+                log.info("X100_PLUG_BACKSTOP is set: a hung projector is restarted at the wall through its plug (off "
+                         "for %s), by itself at most once per hang, and when asked", self._span(self.cfg.backstop_off_seconds))
+        self._resume_backstop()
         self._thread = threading.Thread(target=self._run, name="bridge-core", daemon=True)
         self._thread.start()
 
@@ -486,6 +555,8 @@ class BridgeCore:
         if msg is not None:
             self._take_plug_news()  # what the plug said while the bridge waited counts first
             self._handle(msg)
+        if self._bs_state:
+            self._backstop_step()
         now = time.monotonic()
         if self.pending and now >= self._next_pending_check:
             self._next_pending_check = now + self.cfg.pending_check_interval
@@ -527,6 +598,7 @@ class BridgeCore:
         self._count("commands")
         error: Optional[BridgeError] = None
         deferred = False
+        self._reply_reason = ""
         self._serial_begin(f"command {describe_ops(ops)}")
         try:
             for op in ops:
@@ -542,10 +614,16 @@ class BridgeCore:
             error = BridgeError("INTERNAL_ERROR", str(exc))
         self._serial_said()
         self._fast_poll()
+        reason = self._reply_reason
+        if self._bs_news and not self._bs_state:  # how the last restart went, with the next answer it fits
+            if error is None and not reason:
+                reason, self._bs_news = self._bs_news, ""
+            elif error is not None and error.reason in ("not_started", "just_started"):
+                error.reason, self._bs_news = self._bs_news, ""  # "just_started": by the restart, which didn't help
         # Answer first. The state in the ack already reflects the write (_apply
         # records it), and reading everything back costs several round trips.
-        self._ack(cmd_id, error, deferred=deferred)
-        if error is None and not deferred and not self.cfg.one_way and not self._by_watts:
+        self._ack(cmd_id, error, deferred=deferred, reason=reason)
+        if error is None and not deferred and not self.cfg.one_way and not self._by_watts and not self._hands_off():
             self._refresh_quietly()
             self._publish_state()
 
@@ -737,9 +815,11 @@ class BridgeCore:
         self._tally_time()
         times = ", ".join(f"{state} {seconds / 3600:.1f} h" for state, seconds in sorted(self._time_in.items())
                           if seconds >= 36)
-        log.info("in the last %.0f h: %s, %d commands, %d outages, %d hangs%s; %s", self.cfg.summary_seconds / 3600,
+        restarts = (f", {self._today['restarts']} restarts at the wall ({self._today['restarts that worked']} worked)"
+                    if self._today["restarts"] else "")
+        log.info("in the last %.0f h: %s, %d commands, %d outages, %d hangs%s%s; %s", self.cfg.summary_seconds / 3600,
                  self._counts_text(self._today), self._today["commands"], self._today["outages"],
-                 self._today["hangs"], self._plug_counts_text(self._today), times or "-")
+                 self._today["hangs"], restarts, self._plug_counts_text(self._today), times or "-")
         self._today, self._time_in = Counter(), {}
         self._next_summary = time.monotonic() + self.cfg.summary_seconds
 
@@ -754,22 +834,25 @@ class BridgeCore:
         return (self._power_query_lies and self._started_at is not None
                 and time.monotonic() - self._started_at < self.cfg.start_hold_seconds)
 
-    def _confirm_start(self) -> None:
+    def _confirm_start(self) -> bool:
         """Only say "ok" to an "on" once the X100-4K has started: hung, it acknowledges "on" and stays
         in standby. Starting from standby, it stops answering about its volume at once, so a couple of
-        seconds tell. If it hasn't, say so, but don't send another "on": that can hang it."""
+        seconds tell. If it hasn't, say so, but don't send another "on": that can hang it. Unless the
+        backstop takes the hang on (see _hang_answer): then False, and it will restart it at the wall."""
         time.sleep(self.cfg.start_check_seconds)
         if not self.proj.answers_volume():
             self._start_confirmed = True
+            self._bs_started()
             self._period_ended("the bridge's 'on': it started")
-            return
+            return True
         self._serial_said()
         self._count("hangs")
         log.warning("the projector acknowledged power on but hasn't started%s", self._since_off_text())
         self._period_ended("the bridge's 'on': it was acknowledged, but the projector didn't start")
-        raise BridgeError("NOT_IN_OPERATION", "the projector acknowledged 'on' but hasn't started. If it was "
-                          "switched on at the wall in the last few minutes it may still start; if not, and its "
-                          "remote can't start it either, switch it off at the wall for 30 seconds", "not_started")
+        answer = self._hang_answer()
+        if answer is not None:
+            raise answer
+        return False
 
     def _believed_off(self) -> bool:
         """Off by a recent reading: an "on" can go straight out without asking first."""
@@ -822,8 +905,12 @@ class BridgeCore:
         value = op.get("value")
         if kind not in OP_KINDS:  # before touching the projector, so a typo isn't reported as "unreachable"
             raise BridgeError("INVALID_DIRECTIVE", f"unknown op {kind!r}")
+        if self._bs_state and self._while_restarting(kind, value):
+            return False
         if not self.cfg.one_way:
             self._check_link()
+        if kind == "restart":
+            return self._restart_asked()
         if kind == "power" and str(value).upper() == "ON" and self._believed_off():
             power = PowerState.OFF  # just switch it on: asking first would only add a delay
         else:
@@ -856,16 +943,10 @@ class BridgeCore:
                 if power == PowerState.COOLING:
                     return self._defer(op, PowerState.OFF, cmd_id)
                 self._check_not_cold(power)
-                self.proj.power_on()
-                self._plug_watch.sent("on", time.monotonic())
-                self._set_power(PowerState.WARMING, "the bridge sent 'on'")
-                if not self._power_query_lies:  # nothing more to learn: a projector that says what it's doing
-                    self._period_ended("the bridge's 'on'")
-                self._sent_on, self._sent_off, self._start_confirmed = time.monotonic(), None, False
-                self._doubt_on = ""
-                self._started_at = self._sent_on
-                if self._power_query_lies:
-                    self._confirm_start()
+                self._send_on()
+                if self._power_query_lies and not self._confirm_start():
+                    self._reply_reason = "restarting"
+                    return True  # the backstop has it: the "on" goes again once it has restarted
                 return False
             if power in (PowerState.OFF, PowerState.COOLING):
                 return False
@@ -904,6 +985,17 @@ class BridgeCore:
             return False
 
         raise BridgeError("INVALID_DIRECTIVE", f"unknown op {kind!r}")
+
+    def _send_on(self) -> None:
+        self.proj.power_on()
+        now = time.monotonic()
+        self._plug_watch.sent("on", now)
+        self._set_power(PowerState.WARMING, "the bridge sent 'on'")
+        if not self._power_query_lies:  # nothing more to learn: a projector that says what it's doing
+            self._period_ended("the bridge's 'on'")
+        self._sent_on, self._sent_off, self._start_confirmed = now, None, False
+        self._doubt_on = ""
+        self._started_at = self._sent_on
 
     def _check_not_cold(self, power: PowerState) -> None:
         """After a power cut, the X100-4K's standby can answer just like on (see _doubt_on): until a reading
@@ -982,7 +1074,7 @@ class BridgeCore:
 
     def _run_pending(self) -> None:
         """Run deferred ops in order once the projector reaches the state they need."""
-        if self._quiet() or self._link_down() or self._plug_holding():
+        if self._hands_off():
             return  # nothing may be asked: they wait (and expire as usual)
         self._serial_begin("a deferred command")
         try:
@@ -1180,6 +1272,12 @@ class BridgeCore:
         self._count("outages")
         self._full_reading_due = True  # once the quiet is over: if it was only a missed reply, it's still on
         self._quiet_for(self.cfg.power_up_quiet_seconds)
+        if self._bs_state in ("off_sent", "off", "on_sent", "resume"):
+            self._bs_to("booting")  # its power is back: the quiet, then one reading, then "on" (see _backstop_step)
+            self._bs_back_at = self.clock()
+            self._note_cycle()
+        elif not self._bs_state:
+            self._bs_news = ""  # its power has been cut since the last restart: what came of it is old news
 
     # ------------------------------------------------------------------ for the log
     def _stamp(self, mono: float) -> str:
@@ -1223,6 +1321,15 @@ class BridgeCore:
         self._count(f"plug {event.kind}")
         if event.by_bridge:
             self._count(f"plug {event.kind} by the bridge")
+        if event.kind == "start":
+            self._plug_start_at = event.at
+            self._bs_started()
+        elif event.kind == "off":
+            self._plug_off_at = event.at
+        elif event.kind == "no_reaction":
+            self._plug_ignored_on = event.at
+        elif event.kind == "no_readings":
+            self._plug_unread_on = event.at
         if event.kind == "off":
             how = "the bridge switched it off" if event.by_bridge else "its remote, or the projector itself, switched it off"
             self._period_began(how, at=event.at, fell=f"its draw fell at {self._stamp(event.at)}")
@@ -1263,8 +1370,15 @@ class BridgeCore:
     # ------------------------------------------------------------------ the plug on its mains
     def _plug_holding(self) -> bool:
         """The plug says its power is off, or the projector draws none, or the plug has just reconnected and may
-        have cut it: send nothing."""
-        return self._plug_output is False or bool(self._plug_unpowered) or self._plug_check_until is not None
+        have cut it, or the backstop has told it to switch off, or a bridge restarted in the middle of a restart is
+        waiting to hear from it: send nothing."""
+        return (self._plug_output is False or bool(self._plug_unpowered) or self._plug_check_until is not None
+                or self._bs_state in ("off_sent", "resume"))
+
+    def _hands_off(self) -> bool:
+        """Nothing may be asked of the projector but what a command or the backstop needs, and often not even that:
+        it may be booting, or has no power, or isn't answering, or is being restarted."""
+        return self._quiet() or self._link_down() or self._plug_holding() or bool(self._bs_state)
 
     def _take_plug_news(self) -> None:
         news_came = False
@@ -1300,6 +1414,10 @@ class BridgeCore:
         """``at``: when the reading arrived, as the bridge may have been busy with a command meanwhile."""
         for event in self._plug_watch.reading(at if at is not None else time.monotonic(), output, watts):
             self._plug_event(event)
+        began = self._plug_watch.starting_since
+        if began is not None and self._started_at is not None and began > self._started_at:
+            # The hold after a start runs from the start itself: after an "on" it didn't take, from its remote's.
+            self._started_at = began
         was, self._plug_output = self._plug_output, output
         counted = self._plug_switch_ons
         if switch_ons is not None:
@@ -1311,8 +1429,15 @@ class BridgeCore:
             self._plug_watts = watts if output else 0.0
             self._plug_read_at = at if at is not None else time.monotonic()
             self._count("plug readings")
+            if self._plug_watts > self.cfg.plug_standby_watts:
+                self._plug_calm_since = None
+                if self._plug_watts >= self.cfg.plug_on_watts and (self._bs_paused or self._bs_news):
+                    self._bs_started()  # it's on, whatever got it there: not hung
+            elif self._plug_calm_since is None:
+                self._plug_calm_since = self._plug_read_at
         by = f" ({source})" if source else ""
         no_draw = output and watts is not None and watts <= self.cfg.plug_unplugged_watts
+        ours = self._bs_state in ("off_sent", "off", "on_sent")  # the backstop switched it
         if not output:
             self._plug_unpowered = ""  # the plug's own off says it all
             if was is not False:
@@ -1321,17 +1446,19 @@ class BridgeCore:
                 log.warning("the projector's plug has switched its power off%s: sending the projector nothing until "
                             "it's back", by)
                 self.state.connected = False
-                self._set_power(PowerState.OFF, "the plug switched its power off", "the plug switched its power off")
+                self._set_power(PowerState.OFF, "the plug switched its power off",
+                                "the bridge's backstop switched its plug off" if ours else "the plug switched its power off")
             return
         if was is False:
             self._plug_check_until = None
+            cycled = ("the bridge's backstop switched its plug off and on" if ours
+                      else "the plug switched its power off and on")
             if no_draw:  # its first readings can be 0 W, a second before the projector draws power
-                self._plug_unpowered = "the plug switched its power off and on"
+                self._plug_unpowered = cycled
                 log.warning("the projector's plug has switched its power back on%s, but the projector isn't drawing "
                             "any yet: sending it nothing until it does", by)
                 return
-            self._after_cut("the plug switched its power back on: it comes back in standby",
-                            "the plug switched its power off and on")
+            self._after_cut("the plug switched its power back on: it comes back in standby", cycled)
             log.warning("the projector's plug has switched its power back on%s: leaving the projector alone until "
                         "%s, as questions while it boots can hang it", by, self._quiet_end())
             return
@@ -1390,6 +1517,294 @@ class BridgeCore:
                         "the plug restarted, perhaps, or switched off and on unseen, which cuts its power")
         log.warning("taking it that the plug cut the projector's power (%s): leaving the projector alone until %s, "
                     "as questions while it boots can hang it", why, self._quiet_end())
+
+    # ------------------------------------------------------------------ the backstop: a restart at the wall
+    def _bs_to(self, state: str) -> None:
+        self._bs_state, self._bs_since = state, time.monotonic()
+
+    def _bs_begin(self, found: str, on_at: Optional[float] = None) -> None:
+        self._bs_found, self._bs_found_at, self._bs_on_at = found, time.monotonic(), on_at
+        self._bs_then_on, self._bs_back_at, self._bs_news = True, None, ""  # a new one: the last one's news is moot
+        self._bs_to("verdict")
+
+    def _bs_end(self, outcome: str, news: str = "", warn: bool = False) -> None:
+        (log.warning if warn else log.info)("backstop: %s (%s after it began)", outcome,
+                                            self._span(time.monotonic() - self._bs_found_at))
+        if news:
+            self._bs_news = news
+        self._bs_state, self._bs_on_at = "", None
+        self._note()
+
+    def _bs_started(self) -> None:
+        """It has started: the backstop may restart it by itself again, and the news of the last restart is old."""
+        if self._bs_paused:
+            log.info("backstop: the projector has started, so if it hangs again, the bridge may restart it at the wall")
+        self._bs_paused = self._bs_news = ""
+
+    def _bs_refusal(self, now: float) -> Tuple[str, str]:
+        """Why the backstop may not cut the projector's power now, if it may not (see Config): a reason, for the
+        listener ("restart_unable", "restart_on" or "restart_wait"), and words for the log. ("", "") if it may."""
+        cfg = self.cfg
+        if not cfg.plug_backstop:
+            return "restart_unable", "the backstop is off (X100_PLUG_BACKSTOP)"
+        if self._switch is None or not self._switch.can_switch():
+            return "restart_unable", "the bridge can't switch the plug (no broker login for it, or not signed in)"
+        if not (self._watts_fresh() and self._plug_watch.fresh(now)):
+            return "restart_unable", "there are no recent readings from the plug"
+        if self._plug_holding():
+            return "restart_unable", "the plug's power is off, or the bridge is checking whether the plug restarted"
+        watts = self._plug_watts or 0.0
+        if watts > cfg.plug_standby_watts or self._plug_calm_since is None:
+            return "restart_on", f"it's drawing {watts:.0f} W, more than in standby"
+        for at, what in ((self._plug_off_at, "went off"), (self._plug_start_at, "started")):
+            if at is not None and now - at < cfg.start_hold_seconds:
+                return "restart_wait", f"its draw showed it {what} {now - at:.0f} s ago"
+        if now - self._plug_calm_since < cfg.backstop_calm_seconds:
+            return "restart_wait", f"it drew more than in standby until {now - self._plug_calm_since:.0f} s ago"
+        if self._plug_watch.phase == "starting":
+            return "restart_wait", "its draw is changing: something has just reached it (its remote, say)"
+        return "", ""
+
+    def _hang_answer(self) -> Optional[BridgeError]:
+        """A hung "on" (see _confirm_start): the answer to raise, or None if the backstop takes it on."""
+        if self._bs_state == "starting":  # the backstop's own "on", after its restart
+            began = time.localtime(self.clock() - (time.monotonic() - self._bs_found_at))
+            self._bs_paused = f"the restart at {time.strftime('%H:%M', began)} didn't help"
+            self._bs_news = "restart_failed"
+            return BridgeError("NOT_IN_OPERATION", "the projector was restarted at the wall, but still didn't start. "
+                               "Switch it off at the wall for 2 minutes", "restart_failed")
+        today = BridgeError("NOT_IN_OPERATION", "the projector acknowledged 'on' but hasn't started. If it was "
+                            "switched on at the wall in the last few minutes it may still start; if not, and its "
+                            "remote can't start it either, switch it off at the wall for 30 seconds", "not_started")
+        if not self.cfg.plug_backstop:
+            return today
+        if self._bs_paused:
+            reason, self._bs_news = self._bs_news or "hung_again", ""  # how the last one went, the first time
+            log.info("backstop: not restarting it by itself: %s, and it hasn't started since", self._bs_paused)
+            return BridgeError("NOT_IN_OPERATION", f"the projector is hung again, and {self._bs_paused}, so the bridge "
+                               "won't restart it by itself until it has started. Switch it off at the wall for 2 "
+                               "minutes", reason)
+        reason, refusal = self._bs_refusal(time.monotonic())
+        if refusal:
+            log.info("backstop: not restarting it: %s", refusal)
+            return today
+        self._bs_begin("a hang", on_at=self._sent_on)
+        log.info("backstop: volume still answered %s after the bridge's 'on'. If its draw shows no change by %s after "
+                 "the 'on', it's hung, and the bridge will restart it at the wall", self._span(self.cfg.start_check_seconds),
+                 self._span(self.cfg.plug_cause_seconds))
+        return None
+
+    def _restart_asked(self) -> bool:
+        """"Restart the projector": the same rules, but no hang to wait for. Deferred: it comes on afterwards."""
+        reason, refusal = self._bs_refusal(time.monotonic())
+        if refusal:
+            log.info("backstop: not restarting it, as asked: %s", refusal)
+            raise BridgeError("NOT_IN_OPERATION", f"the bridge won't restart the projector at the wall now: {refusal}",
+                              reason)
+        self._bs_begin("asked")
+        log.warning("backstop: asked to restart the projector: switching its plug off for %s",
+                    self._span(self.cfg.backstop_off_seconds))
+        if not self._bs_cut():
+            self._bs_end("gave up: it couldn't tell the plug to switch off", warn=True)
+            raise BridgeError("NOT_IN_OPERATION", "the bridge couldn't tell the projector's plug to switch off",
+                              "restart_unable")
+        self._reply_reason = "restart"
+        return True
+
+    def _while_restarting(self, kind: Any, value: Any) -> bool:
+        """A command while the backstop is at work. True if that's all it needed: it's answered ok. "Off" before the
+        cut calls the restart off; after it, the restart goes on, but with no "on" at the end. Anything else waits."""
+        want = str(value).upper() if kind == "power" else ""
+        if want == "OFF":
+            if self._bs_state == "verdict":
+                self._bs_end("'off' asked: not cutting its power")
+                return False  # and on to the "off" itself, as after any hang
+            if self._bs_then_on:
+                log.info("backstop: 'off' asked: once its power is back, the bridge won't switch it on")
+                self._bs_then_on = False
+                self._note_cycle()
+            return True
+        if want == "ON" and not self._bs_then_on:
+            log.info("backstop: 'on' asked again: once its power is back, the bridge will switch it on after all")
+            self._bs_then_on = True
+            self._note_cycle()
+        raise BridgeError("NOT_IN_OPERATION", "the bridge is restarting the projector at the wall, through its plug. "
+                          "Give it a couple of minutes", "restart_busy")
+
+    def _bs_switch(self, on: bool) -> bool:
+        self._bs_sent_at = time.monotonic()
+        if self._switch is not None and self._switch.switch(on):
+            return True
+        log.warning("backstop: couldn't tell the plug to switch %s: the bridge isn't signed in to its broker",
+                    "on" if on else "off")
+        return False
+
+    def _bs_cut(self) -> bool:
+        self._bs_cut_at, self._bs_back_at = self.clock(), None
+        self._note_cycle()  # first: a bridge restarted from here on must leave the projector alone
+        if not self._bs_switch(False):
+            return False
+        self._bs_to("off_sent")
+        return True
+
+    def _backstop_step(self) -> None:
+        """Moves a restart on, as what it's waiting for comes (see Config, and _bs_state)."""
+        now = time.monotonic()
+        state, lasted = self._bs_state, now - self._bs_since
+        if state == "verdict":
+            if self._plug_holding():
+                self._bs_end("its power was cut meanwhile, by something else: not cutting it again")
+            elif self._plug_watch.phase == "starting" or (self._plug_watts or 0.0) > self.cfg.plug_standby_watts:
+                self._bs_end("its draw changed after the bridge's 'on' after all: not cutting its power")
+            elif self._plug_unread_on is not None and self._plug_unread_on == self._bs_on_at:
+                self._bs_end("there are no recent readings from the plug, so its draw can't show the hang: not cutting "
+                             "its power", news="restart_unable")
+            elif self._plug_ignored_on is not None and self._plug_ignored_on == self._bs_on_at:
+                reason, refusal = self._bs_refusal(now)
+                if refusal:
+                    self._bs_end(f"not cutting its power after all: {refusal}",
+                                 news="restart_unable" if reason == "restart_unable" else "")
+                    return
+                log.warning("backstop: the projector is hung (volume still answered %s after the bridge's 'on', and its "
+                            "draw showed no change by %s): switching its plug off for %s",
+                            self._span(self.cfg.start_check_seconds), self._span(self.cfg.plug_cause_seconds),
+                            self._span(self.cfg.backstop_off_seconds))
+                if not self._bs_cut():
+                    self._bs_end("gave up: it couldn't tell the plug to switch off", news="restart_unable", warn=True)
+            elif self._bs_on_at is None or now - self._bs_on_at > 2 * self.cfg.plug_cause_seconds:
+                self._bs_end("its draw changed after the bridge's 'on' after all: not cutting its power")
+        elif state == "off_sent":
+            if self._plug_output is False:
+                self._count("restarts")
+                self._bs_to("off")
+            elif lasted >= self.cfg.backstop_switch_seconds:
+                topic = getattr(self._switch, "topic", "its command topic")
+                self._bs_paused = f"the plug didn't switch off when told, at {self._stamp(self._bs_sent_at)[:5]}"
+                self._bs_end(f"gave up: the plug didn't switch off within {self._span(lasted)} of being told. Is its "
+                             f"MQTT control on, and may the bridge's login publish to {topic}?",
+                             news="restart_unable", warn=True)
+        elif state == "off":
+            if lasted >= self.cfg.backstop_off_seconds:
+                log.info("backstop: switching its plug back on")
+                self._bs_switch(True)
+                self._bs_to("on_sent")
+        elif state == "on_sent":
+            if lasted >= self.cfg.backstop_power_back_seconds:
+                self._bs_paused = f"the plug didn't switch back on when told, at {self._stamp(self._bs_since)[:5]}"
+                self._bs_end(f"gave up: the plug hasn't switched back on in {self._span(lasted)}. Its own timer "
+                             "(auto_on) should", news="restart_unable", warn=True)
+            elif (now - self._bs_sent_at >= self.cfg.backstop_switch_seconds and self._switch is not None
+                  and self._switch.can_switch()):
+                log.warning("backstop: the plug hasn't switched back on yet: telling it again")
+                self._bs_switch(True)
+        elif state == "resume":
+            if self._plug_output is None:
+                if lasted >= self.cfg.plug_stale_seconds:
+                    self._bs_end("no reading from the plug since the bridge started, so the restart can't be finished",
+                                 news="restart_unable", warn=True)
+            elif self._plug_output is False:
+                log.info("backstop: the plug's power is still off: switching it back on")
+                self._bs_switch(True)
+                self._bs_to("on_sent")
+            else:
+                self._bs_to("booting")  # back on already: the quiet since the bridge started covers its boot
+        elif state == "booting" and not self._quiet() and not self._plug_holding() and not self._link_down():
+            if self._bs_then_on:
+                self._bs_start_it()
+            else:
+                self._bs_end("done: its power is back, and it has had time to boot. As 'off' was asked meanwhile, the "
+                             "bridge sent no 'on'")
+
+    def _bs_start_it(self) -> None:
+        """Its power is back, and the quiet is over: one reading, then "on", from an ordinary standby only."""
+        self._bs_to("starting")
+        self._serial_begin("backstop")
+        outcome, warn = "", False
+        try:
+            power = self._current_power()
+            if power == PowerState.OFF:
+                self._check_not_cold(power)
+                self._send_on()
+                if self._power_query_lies:
+                    self._confirm_start()  # raises if it didn't start: see _hang_answer
+                self._count("restarts that worked")
+                outcome = "done: the projector has started"
+            elif power == PowerState.ON and self._doubt_on:
+                outcome = ("no 'on': after the restart its standby answers as if it were on, as after some power cuts. "
+                           "Start it with its remote this once")
+            else:
+                outcome = f"no 'on' needed: after the restart, it reads as {power.value}"
+        except BridgeError as exc:
+            if exc.reason == "restart_failed":
+                outcome, warn = ("the 'on' after the restart didn't start it either. Giving up: the bridge won't restart "
+                                 "it by itself again until it has started, but asking still works"), True
+            elif exc.reason == "looks_on":
+                outcome = ("no 'on': after the restart its standby answers as if it were on, as after some power cuts. "
+                           "Start it with its remote this once")
+            else:
+                outcome, warn = f"no 'on': {exc.message}", True
+        except ProjectorError as exc:
+            if isinstance(exc, Unreachable):
+                self._link_failed()
+            outcome, warn = f"no 'on': the projector didn't answer ({exc})", True
+        finally:
+            self._serial_said()
+        self._bs_end(outcome, warn=warn)
+        self._fast_poll()
+        self._publish_state()
+
+    def _note_path(self) -> str:
+        return os.path.join(self.cfg.state_dir, "backstop.json") if self.cfg.state_dir else ""
+
+    def _note_cycle(self) -> None:
+        self._note(cut_at=self._bs_cut_at, back_at=self._bs_back_at, then_on=self._bs_then_on, found=self._bs_found)
+
+    def _note(self, **fields: Any) -> None:
+        """What the backstop is doing, in a file in state_dir, for a bridge restarted in the middle of it (see
+        _resume_backstop). With nothing given, it's over: the file goes."""
+        path = self._note_path()
+        if not path:
+            return
+        try:
+            if not fields:
+                if os.path.exists(path):
+                    os.remove(path)
+                return
+            os.makedirs(self.cfg.state_dir, exist_ok=True)
+            with open(path + ".tmp", "w") as fh:
+                json.dump(fields, fh)
+            os.replace(path + ".tmp", path)
+        except OSError as exc:
+            log.warning("backstop: can't keep its note in %s (%s): a bridge restarted in the middle of a restart won't "
+                        "know of it", path, exc)
+
+    def _resume_backstop(self) -> None:
+        """At start-up: was a restart under way when the bridge stopped? Then its power may be off, or the projector
+        booting: leave it alone, as after any cut, and finish the restart once the plug says how things stand."""
+        path = self._note_path()
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path) as fh:
+                note = json.load(fh)
+            cut_at = float(note["cut_at"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            log.warning("backstop: ignoring its note in %s, which can't be read (%s)", path, exc)
+            self._note()
+            return
+        ago = self.clock() - cut_at
+        if not 0 <= ago < 3600:
+            self._note()  # long over, whatever came of it
+            return
+        self._bs_found, self._bs_found_at = str(note.get("found") or "a hang"), time.monotonic() - ago
+        self._bs_then_on, self._bs_cut_at = bool(note.get("then_on", True)), cut_at
+        self._bs_back_at = note.get("back_at") if isinstance(note.get("back_at"), (int, float)) else None
+        self._bs_to("resume")
+        self._doubt_on, self._full_reading_due = "a power cut", True
+        self._quiet_for(max(self._quiet_until - time.monotonic(), self.cfg.power_up_quiet_seconds))
+        log.warning("backstop: the bridge was restarting the projector at the wall when it stopped (it switched the "
+                    "plug off %s ago): leaving the projector alone until %s, and finishing the restart once the plug "
+                    "says how things stand", self._span(ago), self._quiet_end())
 
     # ------------------------------------------------------------------ on or standby, by the plug's watts
     def _watts_fresh(self) -> bool:
@@ -1579,7 +1994,8 @@ class BridgeCore:
         return {"connected": s.connected, "power": s.power.value, "input": s.input,
                 "volume": s.volume, "muted": s.muted}
 
-    def _ack(self, cmd_id: str, error: Optional[BridgeError], deferred: bool = False) -> None:
+    def _ack(self, cmd_id: str, error: Optional[BridgeError], deferred: bool = False, reason: str = "") -> None:
+        """``reason``, for an answer that's ok: what's happening, in a word ("restarting", say: see BridgeError)."""
         ack: Dict[str, Any] = {"id": cmd_id, "ok": error is None, "ts": int(self.clock() * 1000)}
         if deferred:
             ack["deferred"] = True
@@ -1595,6 +2011,8 @@ class BridgeCore:
                 waiter.result["code"], waiter.result["message"] = error.code, error.message
                 if error.reason:
                     waiter.result["reason"] = error.reason
+            elif reason:
+                waiter.result["reason"] = reason
             waiter.event.set()
         self._publish_state(extra={"ack": ack})
 
@@ -1603,4 +2021,4 @@ class BridgeCore:
 
 
 def describe_ops(ops: List[Dict[str, Any]]) -> str:
-    return ", ".join(f"{o.get('op')}={o.get('value')}" for o in ops)
+    return ", ".join(f"{o.get('op')}" if o.get("value") is None else f"{o.get('op')}={o.get('value')}" for o in ops)

@@ -103,7 +103,7 @@ def validate_ops(body: Any) -> List[Dict[str, Any]]:
 
 
 def describe_ops(ops: List[Dict[str, Any]]) -> str:
-    return ", ".join(f"{o.get('op')}={o.get('value')}" for o in ops)
+    return ", ".join(f"{o.get('op')}" if o.get("value") is None else f"{o.get('op')}={o.get('value')}" for o in ops)
 
 
 class _Server(ThreadingHTTPServer):
@@ -267,6 +267,7 @@ class LocalApi:
                     self._error(504, "TIMEOUT", str(exc))
                     return
                 outcome = ("ok" + (" (queued until the projector is ready)" if result.get("deferred") else "")
+                           + (f" ({result['reason']})" if result.get("reason") else "")
                            if result.get("ok") else f"{result.get('code')}: {result.get('message')}")
                 log.info("local API: %s from %s -> %s in %.0f ms", describe_ops(ops), self.client_address[0],
                          outcome, (time.monotonic() - started) * 1000)

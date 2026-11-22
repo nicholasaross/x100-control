@@ -1,7 +1,8 @@
 # The plug backstop: a design
 
-**Status:** agreed with Nick on 22 November 2026 (his answers are at the end), and being built. It
-ships switched off (`X100_PLUG_BACKSTOP`), to be turned on after the current hang test.
+**Status:** agreed with Nick on 22 November 2026 (his answers are at the end), and built, in the
+simulator, with tests. It ships switched off (`X100_PLUG_BACKSTOP`), to be turned on after the current
+hang test. [As built](#as-built), at the end, says where it differs from the design.
 
 ## What it's for
 
@@ -42,8 +43,8 @@ From the bridge's log and the plug's readings, October to November 2026:
 1. You say "projector on". The bridge sends "on", as now.
 2. It checks, as now, that volume has stopped answering 2 s later. If volume still answers, it
    also waits for the plug: 10 s after the "on", no change in the draw. Both together mean a hang.
-3. It answers you at once: "It's hung, so I'm restarting it at the wall. It'll come on in about
-   two minutes." If the draw then shows it reacted after all, it doesn't cut.
+3. It answers you at once: "It's hung, so I'm restarting it at the wall. It'll come on in two or
+   three minutes." If the draw then shows it reacted after all, it doesn't cut.
 4. It switches the plug off, and back on 30 s later. If the bridge fails in between, the plug's own
    `auto_on` brings the power back after 2 minutes anyway.
 5. When the power is back, the bridge does what it does after any cut: it waits 60 s, then takes
@@ -96,9 +97,10 @@ It never breaks these:
 
 | When | Reply |
 |---|---|
-| A hang, and it's restarting | "It's hung, so I'm restarting it at the wall. It'll come on in about two minutes." |
-| "Restart the projector", in standby | "Righto. Restarting it at the wall. It'll come on in about two minutes." |
+| A hang, and it's restarting | "It's hung, so I'm restarting it at the wall. It'll come on in two or three minutes." |
+| "Restart the projector", in standby | "Righto. Restarting it at the wall. It'll come on in two or three minutes." |
 | "Restart the projector", while it's on | "It's on, so I won't cut its power. Switch it off first." |
+| "Restart the projector", just after a start or an "off" | "It's only just been switched. Try again in a couple of minutes." |
 | "Restart the projector", when it can't (no plug control, say) | "I can't restart it from here. Switch it off at the wall." |
 | A command while it restarts | "It's restarting. Give it a couple of minutes." |
 | At the next command, after a restart that didn't help | "I restarted it, but it still wouldn't start. It needs switching off at the wall." |
@@ -111,20 +113,24 @@ the restart works, unless a later version adds that.
 ## What the log would show
 
 ```
+the projector acknowledged power on but hasn't started. It had been in standby for 2.1 h, ...
+backstop: volume still answered 2 s after the bridge's 'on'. If its draw shows no change by 10 s after the 'on', it's hung, and the bridge will restart it at the wall
 plug: no change in its draw in the 10 s after the bridge's 'on' at 19:30:05 (12.1 W): the projector didn't react to it at all
-backstop: the projector is hung (volume still answered at +2 s; no change in its draw by +10 s): switching its plug off for 30 s
-the projector's plug has switched its power off: sending the projector nothing until it's back
+backstop: the projector is hung (volume still answered 2 s after the bridge's 'on', and its draw showed no change by 10 s): switching its plug off for 30 s
+the projector's plug has switched its power off (MQTT): sending the projector nothing until it's back
 backstop: switching its plug back on
-the projector's plug has switched its power back on: leaving the projector alone until 19:31:46, as questions while it boots can hang it
+the projector's plug has switched its power back on (MQTT): leaving the projector alone until 19:31:46, as questions while it boots can hang it
 plug: its power came back at 19:30:46, and it booted: its draw peaked at 18.9 W at +35 s, and was back under 14.5 W from +43 s
-serial (backstop): power? on (10 ms) · input? no reply (621 ms) · volume? 6 (25 ms) · mute? off (27 ms)
-serial (backstop): 'on' ok (13 ms)
+serial (backstop): power? on (10 ms) · input? no reply (621 ms) · volume? 6 (25 ms) · mute? off (27 ms) · 'on' ok (13 ms)
+serial (backstop): volume? no reply (602 ms)
+backstop: done: the projector has started (2 min after it began)
 plug: the projector came on: a dip to 8.1 W at 19:31:49, then 136 W 15 s later; 2 s after the bridge's 'on'
-backstop: done: it came on 2 min after the hang was found
 ```
 
-The standby period's line would end "ended by a power cut (the bridge's backstop)", and the daily
-line would count the power-cycles, and how many worked.
+(What the plug reports as `source` when the bridge switches it isn't known yet: "MQTT" here is a
+guess.) The hang ends the standby period it hung in, as now. The cut begins a new one, "(the
+bridge's backstop switched its plug off and on)". The daily line counts the restarts, and how many
+worked: `…, 1 hangs, 1 restarts at the wall (1 worked); …`.
 
 ## Switching the plug
 
@@ -192,3 +198,30 @@ projector boots each time: leave it 5 minutes afterwards.
 5. **No daily limit.**
 6. **When to turn it on:** not decided. It ships switched off, and the plan is to turn it on after
    the current hang test.
+
+## As built
+
+Built on 22 November 2026, as above, with these differences and details:
+
+- **"It came on"** means volume stopped answering 2 s after the "on", as for any "on". The plug's
+  line for the start follows in the log.
+- **"About two minutes"** became "two or three minutes": 10 s to see the hang, 30 s off, 60 s for
+  the boot, then 30-70 s for the picture.
+- **A command while it restarts** gets "It's restarting". "Off" before the cut calls the restart off.
+  "Off" after the cut lets the power come back as usual, but no "on" follows. "On" after that puts it
+  back.
+- **"Restart the projector" just after a start or an "off"** gets its own reply: "It's only just been
+  switched. Try again in a couple of minutes." So does a draw that is changing (a remote press, say).
+- **A plug that doesn't switch** when told (within 10 s) counts like a restart that didn't help: no
+  more by itself until the projector has started, and the next command hears "I can't restart it
+  from here".
+- **The news** of a restart that didn't help comes with the next command, whatever it is, once. Later
+  hangs hear "It's hung again". A start, or 50 W or more from the plug, ends it.
+- **A bridge restarted in the middle of one** finds a note in `/var/lib/x100-bridge` (systemd's
+  `StateDirectory=`). It leaves the projector alone for the usual quiet, switches the plug back on if
+  it's still off, and finishes the restart, "on" included.
+- **Found on the way, and fixed:** the 2-minute hold after a start ran from the bridge's "on", even when
+  that "on" didn't take and the remote started it later. An "off" could then go out too soon after the
+  real start. It now runs from the start the draw shows.
+- **Not done yet:** the broker's login for the bridge, and the plug's MQTT control. Both are Nick's
+  to do, with the checks above, before it's turned on.

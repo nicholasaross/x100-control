@@ -1,4 +1,5 @@
-"""The smart plug on the projector's mains (x100_bridge/plug.py): reading its MQTT status.
+"""The smart plug on the projector's mains (x100_bridge/plug.py): reading its MQTT status, and switching it
+for the backstop.
 
 What the bridge does with it is in test_power_quirks.py. The tests with a broker skip if amqtt isn't
 installed.
@@ -15,8 +16,8 @@ import pytest
 from x100.mock import MockServer
 from x100.protocol import PowerState
 from x100_bridge.core import BridgeCore, Config
-from x100_bridge.main import check_config, check_plug_state, make_plug_watcher
-from x100_bridge.plug import PlugStatus, PlugWatcher, parse_broker, parse_switch_status
+from x100_bridge.main import check_config, check_plug_state, make_plug_switch, make_plug_watcher
+from x100_bridge.plug import PlugStatus, PlugSwitch, PlugWatcher, parse_broker, parse_switch_status
 
 from .test_bridge import make_inputs
 
@@ -94,6 +95,38 @@ def test_the_settings_for_telling_on_from_standby_by_its_watts(monkeypatch, capl
     assert cfg.plug_state and any("must be less than X100_PLUG_ON_WATTS" in p for p in check_config(cfg))
 
 
+def test_the_settings_for_the_backstop(monkeypatch, caplog):
+    cfg = Config()
+    assert not cfg.plug_backstop and cfg.backstop_off_seconds == 30.0 and cfg.plug_cause_seconds == 10.0
+    assert make_plug_switch(cfg) is None and caplog.text == ""  # off unless it's set: nothing to say
+    monkeypatch.setenv("X100_PLUG_BACKSTOP", "true")
+    monkeypatch.setenv("X100_BACKSTOP_OFF_SECONDS", "45")
+    monkeypatch.setenv("STATE_DIRECTORY", "/var/lib/x100-bridge")  # as systemd's StateDirectory= sets it
+    cfg = Config.from_env()
+    assert cfg.plug_backstop and cfg.backstop_off_seconds == 45.0 and cfg.state_dir == "/var/lib/x100-bridge"
+    assert make_plug_switch(cfg) is None and "X100_PLUG_MQTT isn't" in caplog.text
+    monkeypatch.setenv("X100_PLUG_MQTT", "127.0.0.1:1884")
+    monkeypatch.setenv("X100_PLUG_PREFIX", "my-plug")
+    assert make_plug_switch(Config.from_env()) is None and "X100_PLUG_CONTROL_USER isn't" in caplog.text
+    monkeypatch.setenv("X100_PLUG_CONTROL_USER", " x100-bridge ")
+    monkeypatch.setenv("X100_PLUG_CONTROL_PASSWORD", "not-a-real-one")
+    monkeypatch.setenv("X100_STATE_DIR", "/tmp/x100-state")
+    cfg = Config.from_env()
+    assert (cfg.plug_control_user, cfg.state_dir) == ("x100-bridge", "/tmp/x100-state")
+    switch = make_plug_switch(cfg)
+    assert isinstance(switch, PlugSwitch) and switch.topic == "my-plug/command/switch:0"
+    assert "not-a-real-one" not in switch.describe() and not switch.can_switch()
+
+
+def test_a_bridge_with_the_backstop_set_but_no_way_to_switch_says_so(caplog):
+    with MockServer(quirks=True) as srv:
+        from .test_power_quirks import driver
+        core = BridgeCore(Config(plug_backstop=True), driver(srv), make_inputs(), publish=lambda doc: None)
+        core.start()
+        core.stop()
+    assert "X100_PLUG_BACKSTOP is set, but the bridge has no way to switch the projector's plug" in caplog.text
+
+
 def test_bad_plug_settings_dont_stop_the_bridge(caplog):
     with MockServer(quirks=True) as srv:
         from .test_power_quirks import driver
@@ -125,12 +158,16 @@ class FakePlug:
     def __init__(self, port):
         import paho.mqtt.client as mqtt
 
-        self.seen = []
+        self.seen, self.got = [], []
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="plug-" + uuid.uuid4().hex[:6])
-        self.client.on_message = lambda client, userdata, msg: self.seen.append(msg.topic)
+        self.client.on_message = self._on_message
         self.client.connect("127.0.0.1", port)
         self.client.subscribe("#")
         self.client.loop_start()
+
+    def _on_message(self, client, userdata, msg):
+        self.seen.append(msg.topic)
+        self.got.append((msg.topic, msg.payload))
 
     def send(self, topic, payload, retain=False):
         self.client.publish(f"{PREFIX}/{topic}", payload, qos=1, retain=retain).wait_for_publish(timeout=5)
@@ -222,3 +259,58 @@ def test_a_cut_the_plug_reports_over_mqtt_gets_the_projector_left_alone(broker):
             watcher.stop()
             plug.close()
             core.stop()
+
+
+@pytest.fixture
+def broker_taking_any_login():
+    """The Pi's broker takes the bridge's login. This one takes any: what it may send isn't tested here."""
+    pytest.importorskip("amqtt")
+    from .test_mqtt_integration import BrokerThread
+
+    b = BrokerThread(free_port())
+    b.config["auth"]["plugins"] = ["auth_anonymous"]
+    b.start()
+    yield b
+    b.stop()
+
+
+def test_the_switch_signs_in_and_sends_only_on_and_off_and_nothing_retained(broker_taking_any_login):
+    broker = broker_taking_any_login
+    plug = FakePlug(broker.port)
+    switch = PlugSwitch(f"127.0.0.1:{broker.port}", PREFIX, "x100-bridge", "not-a-real-one")
+    try:
+        assert not switch.can_switch() and not switch.switch(False)  # not signed in yet: nothing sent
+        switch.start()
+        assert wait_for(switch.can_switch)
+        assert switch.switch(False) and switch.switch(True)
+        assert wait_for(lambda: len(plug.got) == 2)
+        assert plug.got == [(f"{PREFIX}/command/switch:0", b"off"), (f"{PREFIX}/command/switch:0", b"on")]
+        late = FakePlug(broker.port)  # a client that subscribes afterwards gets nothing: none of it was retained
+        time.sleep(0.5)
+        assert late.got == []
+        late.close()
+    finally:
+        switch.stop()
+        plug.close()
+
+
+def test_a_broker_that_refuses_its_login_is_logged_once(broker, caplog):
+    switch = PlugSwitch(f"127.0.0.1:{broker.port}", PREFIX, "x100-bridge", "not-a-real-one")
+    switch.start()
+    try:
+        assert wait_for(lambda: "the broker said Not authorized" in caplog.text, limit=5)
+        assert not switch.can_switch() and not switch.switch(False)
+    finally:
+        switch.stop()
+
+
+def test_without_its_broker_the_switch_says_so_once_and_cant_switch(caplog):
+    switch = PlugSwitch(f"127.0.0.1:{free_port()}", PREFIX, "x100-bridge", "not-a-real-one")
+    switch.start()
+    try:
+        assert wait_for(lambda: "can't sign in to the plug's broker" in caplog.text, limit=5)
+        assert not switch.can_switch() and not switch.switch(False)
+        time.sleep(2.5)
+        assert caplog.text.count("can't sign in to the plug's broker") == 1
+    finally:
+        switch.stop()

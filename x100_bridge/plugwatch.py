@@ -56,11 +56,12 @@ class PlugWatch:
     time into a clock time for the log."""
 
     def __init__(self, unplugged_watts: float, standby_watts: float, on_watts: float,
-                 stamp: Callable[[float], str]):
+                 stamp: Callable[[float], str], cause_seconds: float = CAUSE_SECONDS):
         self.unplugged_watts = unplugged_watts
         self.standby_watts = standby_watts
         self.on_watts = on_watts
         self.stamp = stamp
+        self.cause_seconds = cause_seconds  # see CAUSE_SECONDS: shorter only in tests
         self.phase = ""                       # "no power", "booting", "standby", "starting", "on", "falling",
         self.watts: Optional[float] = None    # "between"; "" before the first reading
         self.last_at: Optional[float] = None  # when the last reading came
@@ -92,6 +93,11 @@ class PlugWatch:
 
     def fresh(self, now: float) -> bool:
         return self.last_at is not None and now - self.last_at < FRESH_SECONDS
+
+    @property
+    def starting_since(self) -> Optional[float]:
+        """A start under way (or something like one): since its dip, or its rise above standby."""
+        return self._start_at if self.phase == "starting" else None
 
     # ------------------------------------------------------------------ readings
     def reading(self, at: float, output: bool, watts: Optional[float]) -> List[PlugEvent]:
@@ -184,7 +190,7 @@ class PlugWatch:
                                     f"but only to {self.watts:.0f} W, and has stayed there: a dim picture, perhaps",
                                     self._fall_by_bridge, self._fall_at))
             self.phase, self._fall_at = "between", None
-        if not self._on_told and self._on_at is not None and now - self._on_at >= CAUSE_SECONDS:
+        if not self._on_told and self._on_at is not None and now - self._on_at >= self.cause_seconds:
             self._on_told = True
             if self.fresh(now):
                 events.append(PlugEvent("no_reaction", f"no change in its draw in the {now - self._on_at:.0f} s after "
@@ -193,7 +199,7 @@ class PlugWatch:
             else:
                 events.append(PlugEvent("no_readings", "no recent readings from the plug, so its draw can't show what "
                                         "the bridge's 'on' did", True, self._on_at))
-        if not self._off_told and self._off_at is not None and now - self._off_at >= CAUSE_SECONDS:
+        if not self._off_told and self._off_at is not None and now - self._off_at >= self.cause_seconds:
             self._off_told = True
             if self.fresh(now) and self.phase == "on":
                 events.append(PlugEvent("no_off", f"still drawing {self.watts:.0f} W {now - self._off_at:.0f} s after "
@@ -202,9 +208,8 @@ class PlugWatch:
         return events
 
     # ------------------------------------------------------------------ helpers
-    @staticmethod
-    def _caused(sent_at: Optional[float], at: float) -> bool:
-        return sent_at is not None and 0.0 <= at - sent_at <= CAUSE_SECONDS
+    def _caused(self, sent_at: Optional[float], at: float) -> bool:
+        return sent_at is not None and 0.0 <= at - sent_at <= self.cause_seconds
 
     def _who(self, by_bridge: bool, sent_at: Optional[float], at: float, what: str) -> str:
         if by_bridge and sent_at is not None:

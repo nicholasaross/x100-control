@@ -9,7 +9,7 @@
 
 With spoken replies (replies.py), the player is also asked for those by name ("plug_off", say). It
 plays the clip, or if there isn't one, the chime it stands in for: "queued" for the "queued_..."
-replies, and "fail" for the rest.
+replies and the restarts that are under way ("restart", "restarting"), and "fail" for the rest.
 
 ``listener.py`` only needs the ``ChimePlayer`` interface, so a remote speaker
 (an ESP32 board, say) can play them instead.
@@ -37,11 +37,14 @@ CHIMES = {
 TAIL = 0.15  # keep ignoring the mic this long after a chime ends (room echo)
 
 
+QUEUED_REPLIES = ("restart", "restarting")  # accepted: it comes on once it has restarted
+
+
 def chime_for(kind: str) -> str:
     """The chime a spoken reply stands in for, when it has no clip."""
     if kind in CHIMES:
         return kind
-    return "queued" if kind.startswith("queued") else "fail"
+    return "queued" if kind.startswith("queued") or kind in QUEUED_REPLIES else "fail"
 
 
 def pick_sound(kind: str, clips: Dict[str, np.ndarray], tones: Dict[str, np.ndarray]) -> np.ndarray:

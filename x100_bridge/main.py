@@ -35,7 +35,7 @@ from x100.projector import projector_from_env
 
 from .core import BridgeCore, Config, system_uptime
 from .local_api import ApiConfigError, LocalApi, check_settings
-from .plug import PlugWatcher, record
+from .plug import PlugSwitch, PlugWatcher, record
 
 log = logging.getLogger("x100.bridge")
 
@@ -138,6 +138,27 @@ def check_plug_state(cfg: Config) -> None:
         cfg.plug_state = False
 
 
+def make_plug_switch(cfg: Config) -> Optional[PlugSwitch]:
+    """What switches the plug, for the backstop (X100_PLUG_BACKSTOP), if it's on and has what it needs. If it
+    hasn't, that's logged, and the bridge carries on without the backstop: it never restarts the projector."""
+    if not cfg.plug_backstop:
+        return None
+    if not cfg.plug_enabled:
+        log.error("X100_PLUG_BACKSTOP is set, but X100_PLUG_MQTT isn't: carrying on without the backstop")
+        return None
+    if not cfg.plug_control_user:
+        log.error("X100_PLUG_BACKSTOP is set, but X100_PLUG_CONTROL_USER isn't: the bridge needs a broker login to "
+                  "switch the plug, so it's carrying on without the backstop")
+        return None
+    try:
+        return PlugSwitch(cfg.plug_mqtt, cfg.plug_prefix, cfg.plug_control_user, cfg.plug_control_password)
+    except ImportError:
+        log.error("X100_PLUG_BACKSTOP is set, but paho-mqtt isn't installed: carrying on without the backstop")
+    except ValueError as exc:
+        log.error("%s: carrying on without the backstop", exc)
+    return None
+
+
 def _get_json(url: str, token: str = "", timeout: float = 3.0) -> Dict[str, Any]:
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -160,7 +181,7 @@ def make_plug_watcher(cfg: Config, core: BridgeCore) -> Optional[PlugWatcher]:
 
 
 def run_check(cfg: Config, core: BridgeCore, api: Optional[LocalApi], link: Optional[MqttLink],
-              plug: Optional[PlugWatcher] = None) -> int:
+              plug: Optional[PlugWatcher] = None, switch: Optional[PlugSwitch] = None) -> int:
     ok = True
     print(version_line())
     print(f"Projector link: {core.proj.transport.describe()} ({'one-way' if cfg.one_way else 'two-way'})")
@@ -212,6 +233,19 @@ def run_check(cfg: Config, core: BridgeCore, api: Optional[LocalApi], link: Opti
     elif cfg.plug_enabled:
         ok = False
         print("The projector's plug: not read (see the error above)")
+
+    if switch is not None:
+        print(f"Switching the plug, for the backstop: {switch.describe()}")
+        switch.start()  # it signs in, and sends nothing
+        if switch.ready.wait(timeout=5):
+            print("  signed in. Whether its login may switch the plug shows only when it does")
+        else:
+            ok = False
+            print("  can't sign in to the broker -- check X100_PLUG_CONTROL_USER and X100_PLUG_CONTROL_PASSWORD")
+        switch.stop()
+    elif cfg.plug_backstop:
+        ok = False
+        print("Switching the plug, for the backstop: not possible (see the error above)")
 
     if link is not None:
         print(f"AWS IoT: {cfg.iot_endpoint}:{cfg.iot_port} as {cfg.thing_name}")
@@ -291,7 +325,8 @@ def main(argv=None) -> int:
         if link is not None:  # local-only mode has nowhere to publish to
             link.publish_reported(doc)
 
-    core = BridgeCore(cfg, projector, inputs, publish=publish, pjlink=pjlink, uptime=system_uptime)
+    switch = make_plug_switch(cfg)
+    core = BridgeCore(cfg, projector, inputs, publish=publish, pjlink=pjlink, uptime=system_uptime, plug_switch=switch)
     link = MqttLink(cfg, on_command=core.submit, on_connected=core.request_full_publish) if cfg.aws_enabled else None
     if link is not None:
         link_holder["link"] = link
@@ -305,7 +340,7 @@ def main(argv=None) -> int:
 
     plug = make_plug_watcher(cfg, core)
     if args.check:
-        return run_check(cfg, core, api, link, plug)
+        return run_check(cfg, core, api, link, plug, switch)
 
     stop = threading.Event()
 
@@ -327,10 +362,14 @@ def main(argv=None) -> int:
         link.start()
     if plug is not None:
         plug.start()
+    if switch is not None:
+        switch.start()
     try:
         while not stop.wait(1.0):
             pass
     finally:
+        if switch is not None:
+            switch.stop()
         if plug is not None:
             plug.stop()
         if api is not None:

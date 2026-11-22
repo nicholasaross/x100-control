@@ -23,6 +23,7 @@ log = logging.getLogger("x100.listener.commands")
 
 ON = [{"op": "power", "value": "ON"}]
 OFF = [{"op": "power", "value": "OFF"}]
+RESTART = [{"op": "restart"}]  # at the wall, through its plug, then "on": only with the bridge's backstop
 
 DEFAULT_PHRASES: Dict[str, List[Dict[str, Any]]] = {
     "projector on": ON,
@@ -33,6 +34,8 @@ DEFAULT_PHRASES: Dict[str, List[Dict[str, Any]]] = {
     "turn off the projector": OFF,
     "turn the projector off": OFF,
     "switch off the projector": OFF,
+    "restart the projector": RESTART,
+    "reboot the projector": RESTART,
 }
 
 
@@ -42,7 +45,8 @@ class Phrase:
     ops: List[Dict[str, Any]] = field(compare=False, hash=False)
 
     def describe(self) -> str:
-        return ", ".join(f"{o.get('op')}={o.get('value')}" for o in self.ops)
+        return ", ".join(f"{o.get('op')}" if o.get("value") is None else f"{o.get('op')}={o.get('value')}"
+                         for o in self.ops)
 
 
 def normalise(text: str) -> str:

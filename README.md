@@ -33,6 +33,7 @@ Say "Hey Jarvis", then the command, in one breath or with a pause of up to 3.5 s
 |---|---|
 | "Hey Jarvis, projector on" / "…turn on the projector" / "…switch on the projector" | Power on, including from standby |
 | "Hey Jarvis, projector off" / "…turn off the projector" / "…turn the projector off" | Power off |
+| "Hey Jarvis, restart the projector" / "…reboot the projector" | Only with the backstop (below): switches its plug off for 30 s, then on, and once it has booted, switches the projector on. Not while it's on |
 
 What you hear back:
 
@@ -285,16 +286,31 @@ over RS-232 (see the last point), and seven of the clips gave the same results o
     projector is drawing full power. A plug that drops out for a moment doesn't hold anything up.
     And if the plug's power is on but the projector draws almost nothing (3 W or less: unplugged
     from the plug, say), it sends nothing, and gives it the 5 minutes' quiet once it draws again.
-    It only reads the plug, and never switches it. `X100_PLUG_MQTT` and `X100_PLUG_PREFIX` in
-    `bridge.env` turn this on (the example file says how), and `x100-bridge --check` tests them;
+    It only reads the plug, and switches it only for the backstop, below. `X100_PLUG_MQTT` and
+    `X100_PLUG_PREFIX` in `bridge.env` turn this on (the example file says how), and
+    `x100-bridge --check` tests them;
   * with that plug and `X100_PLUG_STATE=true`, an experiment, tells on from standby by what the
     projector draws: standby at 25 W or less, on at 50 W or more, and starting or stopping in between.
     Then it asks the projector nothing except what a command needs: no checks in standby, no questions
     as it goes off, and none before "on". It still checks once after "on" that the projector started.
     It reads it once when the bridge starts and after a power cut, as the watts can't tell the standby
     that answers like on. With no reading from the plug for 3 minutes, it asks the projector as usual;
+  * with that plug and `X100_PLUG_BACKSTOP=true`, restarts a hung projector at the wall. It's off
+    unless it's set ([docs/plug-backstop.md](docs/plug-backstop.md) has the design). When its "on"
+    is acknowledged but it hasn't started 2 s later, and its draw shows no change at all 10 s after
+    the "on", it's hung. The bridge then says "It's hung, so I'm restarting it at the wall", switches
+    the plug off for 30 s and back on, leaves the projector alone for the usual quiet, reads it once,
+    and switches it on, from an ordinary standby only. "Restart the projector" does the same when
+    asked. It never cuts the power while the projector draws more than standby, while its draw is
+    changing, or within 2 minutes of a start or an "off". It needs fresh readings from the plug, and
+    a way to switch it: the plug's "MQTT control" on, and a broker login of the bridge's own
+    (`X100_PLUG_CONTROL_USER`, `X100_PLUG_CONTROL_PASSWORD`). By itself, it restarts it once per
+    hang: if the "on" after the restart hangs too, it stops, and says so at the next command.
+    Asking still works. If the bridge itself restarts in the middle of one, it finishes it, with the
+    same quiet;
   * sends no power command for 2 minutes after the projector starts (by voice, remote or its button):
-    an "off" waits, and a repeated "on" isn't sent;
+    an "off" waits, and a repeated "on" isn't sent. With a plug, the 2 minutes run from the start its
+    draw shows, so after an "on" it didn't take, from its remote's start;
   * never sends "on" by itself, and says "ok" to an "on" only once the projector has visibly started
     (from standby it stops answering about its volume at once), about 3 s after the command.
 
@@ -354,6 +370,8 @@ woke it" is always slower, as it replays the last 0.5 s into the spotter; the ne
 | Chimes where you'd expect the voice | Its clips aren't made yet: the listener's log says which. Run `cd /opt/x100-control && sudo -u x100 .venv/bin/x100-listener --env-file listener.env --make-replies`, then `sudo systemctl restart x100-listener`. Or `REPLIES=chimes` is set in listener.env. |
 | Two rising notes but nothing happened | It probably heard the other command (on/off) and there was nothing to do. Say it again. |
 | Two falling notes or a spoken reply after "on", and the log says the projector "hasn't started" | It acknowledged "on" but stayed in standby: it has probably hung. Try its remote: press once, wait about 70 s, and press again. If that can't start it either, switch it off at the wall for 2 minutes, back on, and leave it 3 minutes before using the remote (the bridge stays quiet meanwhile). |
+| "It's hung, so I'm restarting it at the wall" (the backstop) | Leave it: the plug goes off for 30 s, then on, and the projector comes on two or three minutes after you spoke. Commands meanwhile get "It's restarting". `backstop:` lines in the bridge's log say each step. If it says "I restarted it, but it still wouldn't start", switch it off at the wall for 2 minutes. |
+| The bridge's log says "backstop: gave up: the plug didn't switch off" | The plug took no notice of the bridge: check its "MQTT control" is on, and that the bridge's broker login may publish to `<prefix>/command/switch:0`. The bridge won't try again by itself until the projector has started. |
 | Two falling notes or a spoken reply, and the log says the projector "may still be booting" | It stopped answering for a while (a power cut, say), and questions while it boots can hang it, so the bridge leaves it alone after it answers again: 5 minutes, or `X100_POWER_UP_QUIET_SECONDS` (the log says until when). The reply says "Give it a few minutes", or "Give it a minute" in the last 90 s. Its remote works once it has started up. |
 | Two falling notes or a spoken reply, and the log says the projector's plug "has switched its power off" | The plug's output is off, so the projector has no power. Switch it back on with the plug's button. Then the bridge leaves the projector alone for 5 minutes while it boots. |
 | Two falling notes or a spoken reply, and the log says the projector's plug "has just reconnected" | The plug may have restarted, which cuts the projector's power. The bridge waits for the plug's next reading, for up to 10 s. Try again then. |
