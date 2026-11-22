@@ -266,8 +266,9 @@ the wall.
   - **Never resends "on" by itself,** except once after the backstop's restart at the wall (below). 2 s
     after "on" it checks whether volume still answers. If it does, the projector is still in standby,
     and the bridge reports that it hasn't started.
-  - **Can restart a hung projector at the wall, with `X100_PLUG_BACKSTOP=true`** (off by default;
-    built on 22 November 2026, not yet turned on). `docs/plug-backstop.md` is the design Nick agreed.
+  - **Can restart a hung projector at the wall, with `X100_PLUG_BACKSTOP=true`** (off by default; in
+    build 6242a37a, installed on 22 November 2026, but not yet turned on). `docs/plug-backstop.md` is
+    the design Nick agreed.
     - A hang: its "on" is acknowledged, volume still answers 2 s later, and the plug's readings show
       no change at all in its draw by 10 s after the "on" (`plug_cause_seconds`). The listener hears
       "restarting" at once (an answer that's ok, and deferred). If the draw changes before the cut,
@@ -377,10 +378,10 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
       rm -rf x100-control && unzip -q x100-control.zip && cd x100-control && sudo deploy/install.sh
 
   - Builds up to 3dc308bf left a root-owned cache file in the unpacked folder: their package check
-    ran Python as root from it, which also imported the unpacked copy, not the installed one. So the
-    first install after them needs `sudo rm -rf x100-control`; the Pi's folder has that file now.
-    install.sh now runs its Python with `-P` and clears any root-owned cache it finds there, so a
-    plain `rm` works from then on.
+    ran Python as root from it, which also imported the unpacked copy, not the installed one.
+    install.sh now runs its Python with `-P` and clears any root-owned cache it finds there. The
+    first install after them (6242a37a, 22 November) needed `sudo rm` once, and left nothing of
+    root's behind, so a plain `rm` works now.
 
   - `install.sh` keeps bridge.env, listener.env, config/, models and clips.
   - It ends by printing the installed build ID. Check that it matches the one make_release printed.
@@ -388,12 +389,11 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
 - **Install over SSH:** Nick's SSH key is on the Pi, so `scp` and read-only `ssh` commands work from
   his Mac. sudo there needs his password (`sudo -n true` fails). So run the install in a tab of his
   Terminal panel, as `ssh -t x100-controller@x100-pi.local 'rm -rf x100-control && unzip -q
-  x100-control.zip && cd x100-control && sudo deploy/install.sh'` (`sudo rm` the first time, above),
-  and he types the password there.
+  x100-control.zip && cd x100-control && sudo deploy/install.sh'`, and he types the password there.
   It ends with `Installed: … (build <id>, …)` and `Connection to x100-pi.local closed.`
 - **Tags so far:** `build-94bd0861`, `build-e776ca5b`, `build-df034892`, `build-91c5549f`,
-  `build-bbc37ab4`, `build-2d0dd24e`, and `build-3dc308bf`, the build installed since 17:34 on
-  17 November.
+  `build-bbc37ab4`, `build-2d0dd24e`, `build-3dc308bf`, and `build-6242a37a`, the build installed
+  since 19:07 on 22 November.
 
 ## Working with Nick
 
@@ -428,7 +428,9 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
   Roku's "1-touch play" off). From 18 to 27 October, at one check every 2 s, it was 4 of 9. So
   neither change stopped it.
   - **The next phase, since 16:53 on 17 November:** build 2d0dd24e (3dc308bf since 17:34: the
-    "Give it a minute" reply, and serial times without the pause between commands), with `X100_PLUG_MQTT=127.0.0.1:1884`,
+    "Give it a minute" reply, and serial times without the pause between commands; 6242a37a since
+    19:07 on 22 November: the backstop, off, and the hold after a start timed from the start its draw
+    shows), with `X100_PLUG_MQTT=127.0.0.1:1884`,
     `X100_PLUG_PREFIX=x100-plug`, `X100_PLUG_STATE=true` and `X100_POWER_UP_QUIET_SECONDS=60` added
     to bridge.env (the old one is kept beside it, as `bridge.env.bak-20261117-164935`). While the
     plug's readings are fresh, the bridge asks the projector nothing in standby, and nothing after an
