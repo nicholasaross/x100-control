@@ -25,6 +25,8 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=-/opt/x100-control/config
+# /var/lib/x100-bridge, for the backstop's note of a restart under way (it's in STATE_DIRECTORY).
+StateDirectory=x100-bridge
 
 [Install]
 WantedBy=multi-user.target

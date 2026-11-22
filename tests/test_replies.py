@@ -79,6 +79,13 @@ def test_the_bridge_says_in_a_word_why_it_refused():
     (Result(False, "BRIDGE_UNREACHABLE", "refused"), ON, "bridge_down"),
     (Result(False, "NOT_IN_OPERATION", "a newer bridge", reason="something_new"), ON, "fail"),
     (Result(False, "UNAUTHORIZED", "wrong token"), ON, "fail"),
+    # The backstop: an answer that's ok can say what's happening too.
+    (Result(True, deferred=True, reason="restarting"), ON, "restarting"),
+    (Result(True, deferred=True, reason="restart"), [{"op": "restart"}], "restart"),
+    (Result(True, reason="restart_failed"), OFF, "restart_failed"),
+    (Result(True, deferred=True, reason="something_new"), OFF, "queued_off"),
+    (Result(False, "NOT_IN_OPERATION", "restarting", reason="restart_busy"), ON, "restart_busy"),
+    (Result(False, "NOT_IN_OPERATION", "it's on", reason="restart_on"), [{"op": "restart"}], "restart_on"),
 ])
 def test_what_the_listener_says_for_each_answer(result, ops, said):
     assert reply_for(result, ops) == said
@@ -116,6 +123,9 @@ def test_without_its_clip_a_reply_plays_the_chime_it_stands_in_for():
     assert pick_sound("queued_off", {}, tones) is tones["queued"]
     assert pick_sound("ok", {"plug_off": clip}, tones) is tones["ok"]
     assert chime_for("unclear") == "unclear" and chime_for("anything_else") == "fail"
+    # A restart under way is accepted, and waits: the level notes. One that can't be done: the falling notes.
+    assert chime_for("restarting") == chime_for("restart") == "queued"
+    assert chime_for("restart_on") == chime_for("restart_failed") == chime_for("hung_again") == "fail"
 
 
 def test_the_setting(monkeypatch):

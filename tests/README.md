@@ -25,12 +25,19 @@ The code runs on Python 3.11 only, as the Pi does, so test on 3.11.
   mains, too quick for checks once an hour to see: the bridge leaves the projector alone once the plug
   reports it, and takes a plug that reconnects to its broker for a restart unless its reading shows it
   kept running, or the projector is on. A count of switch-ons that goes up means an off and on unseen,
-  and a projector that draws nothing with the plug's power on has been unplugged from it.
+  and a projector that draws nothing with the plug's power on has been unplugged from it. And the
+  backstop, which restarts a hung projector at the wall through a fake plug switch: the hazards (a
+  reading as it boots after the restart, a cut while it's on, a second restart in the same hang, a
+  bridge restarted mid-way that reads it at once), then each prevented. Also its other rules: no cut
+  just after an "off", without fresh readings, or when the draw reacted to the "on", and no "on" after
+  it from the standby that answers like on. And the hold after a start, timed from the remote's start
+  when the bridge's "on" didn't take.
 * `test_logging.py` – the log: the serial traffic in words, bytes sent unasked, what the plug's draw
   says the projector did (from the real readings of 9 to 17 November), the standby period lines and
   hangs, the daily totals, the reply the listener played, and the plug recorder.
 * `test_plug.py` – reading that plug: its MQTT status, its settings, a broker that isn't there, and a
-  cut it reports over MQTT, end to end (the tests with a broker skip if `amqtt` isn't installed).
+  cut it reports over MQTT, end to end. And switching it for the backstop: its settings, its sign-in,
+  and only `on` and `off` sent, never retained (the tests with a broker skip if `amqtt` isn't installed).
 * `test_replies.py` – the spoken replies: the bridge's reason for a refusal, the line the listener picks
   for each answer, the gruff effect (lower, at much the same pace), making the clips once and afresh when
   a line changes, loading them at the speaker's rate and volume, the chime a reply falls back to, and

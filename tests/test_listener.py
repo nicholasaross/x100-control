@@ -353,6 +353,8 @@ def test_phrases_normalise_and_extend():
     assert phrases["PROJECTOR ON"] == [{"op": "key", "value": 1}]  # an extra phrase can redefine a default
     assert phrases["TURN OFF THE PROJECTOR"] == [{"op": "power", "value": "OFF"}]
     assert Phrase("PROJECTOR ON", [{"op": "power", "value": "ON"}]).describe() == "power=ON"
+    assert phrases["RESTART THE PROJECTOR"] == phrases["REBOOT THE PROJECTOR"] == [{"op": "restart"}]
+    assert Phrase("RESTART THE PROJECTOR", [{"op": "restart"}]).describe() == "restart"
 
 
 def test_extra_phrases_setting():

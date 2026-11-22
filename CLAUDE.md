@@ -66,8 +66,9 @@ changing anything.
 - `x100_bridge/`:
   - `core.py`: `BridgeCore`, which holds state, deferral, polling and all the power rules below.
   - `local_api.py`: the HTTP API.
-  - `plug.py`: reads the plug's MQTT status, and passes it to `BridgeCore`. It never publishes. Also the
-    plug recorder (`x100-bridge --record-plug`).
+  - `plug.py`: reads the plug's MQTT status, and passes it to `BridgeCore` (`PlugWatcher`, which never
+    publishes). Switches the plug for the backstop (`PlugSwitch`, its own broker login). Also the plug
+    recorder (`x100-bridge --record-plug`).
   - `plugwatch.py`: what the projector's draw says it did, for the log only: starts, offs, presses,
     boots, and what came of the bridge's own "on" and "off".
   - `main.py`.
@@ -260,9 +261,35 @@ the wall.
       asks the projector as without the plug, and logs that. It logs again when the readings are back.
     - The daily line and the hang line count the readings from the plug.
   - **For 120 s after a start (`X100_START_HOLD_SECONDS`):** sends no power command. An "off"
-    waits, and a repeated "on" isn't sent.
-  - **Never resends "on" by itself.** 2 s after "on" it checks whether volume still answers. If it
-    does, the projector is still in standby, and the bridge reports that it hasn't started.
+    waits, and a repeated "on" isn't sent. With a plug, the 120 s run from when its draw shows the
+    start beginning: after an "on" it didn't take, from its remote's start, not the "on".
+  - **Never resends "on" by itself,** except once after the backstop's restart at the wall (below). 2 s
+    after "on" it checks whether volume still answers. If it does, the projector is still in standby,
+    and the bridge reports that it hasn't started.
+  - **Can restart a hung projector at the wall, with `X100_PLUG_BACKSTOP=true`** (off by default;
+    built on 22 November 2026, not yet turned on). `docs/plug-backstop.md` is the design Nick agreed.
+    - A hang: its "on" is acknowledged, volume still answers 2 s later, and the plug's readings show
+      no change at all in its draw by 10 s after the "on" (`plug_cause_seconds`). The listener hears
+      "restarting" at once (an answer that's ok, and deferred). If the draw changes before the cut,
+      it doesn't cut.
+    - Then: the plug off (MQTT control: `off` on `<prefix>/command/switch:0`), back on 30 s later
+      (`X100_BACKSTOP_OFF_SECONDS`), the usual quiet and one reading, and "on" from an ordinary
+      standby only. Not from the standby that answers like on.
+    - Also when asked: "restart the projector" or "reboot the projector" (the op `restart`), then
+      "on" too.
+    - Never while it draws over 25 W, or has in the last 30 s (`backstop_calm_seconds`), or while
+      its draw is changing, or within 120 s of a start or "off" its draw showed. Never without fresh
+      readings, or without a way to switch the plug (`X100_PLUG_CONTROL_USER` and `_PASSWORD`, a
+      broker login that may publish to that topic only).
+    - By itself, once per hang. If the "on" after it hangs too, or the plug doesn't switch when told,
+      it pauses until the projector has next started. Asking still works. The next command gets the
+      news ("restart_failed", "restart_unable"), and later hangs "hung_again".
+    - While it's at work, commands get "restart_busy". "Off" before the cut calls it off; after the
+      cut, the restart finishes but sends no "on".
+    - It notes a restart under way in `state_dir` (systemd's `StateDirectory=`, `/var/lib/x100-bridge`).
+      A bridge restarted in the middle of one leaves the projector alone, switches the plug back on
+      if need be, and finishes it.
+    - Its lines in the log start `backstop:`. The daily line counts the restarts and how many worked.
 - **To recover a hung projector,** first try its remote: press once, wait about 70 s, and press
   again. That worked on 16 November, but not on 9 November. If it still doesn't start, switch it off
   at the wall for 2 minutes, then back on. Leave it 3 minutes before using its remote. The bridge
@@ -450,9 +477,11 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
     about 30 s. With hourly checks the bridge saw nothing, so an "on" while it booted would have gone
     straight to it. His "on" came 1.5 to 5 minutes later, and worked. On 2 November a restart of the
     plug for a settings change went unseen the same way.
-  - Still possible later, with Nick's agreement and tests: power-cycling a hang. The design for it,
-    for Nick's review, is in `docs/plug-backstop.md`: its rules, what you'd hear, the plug and broker
-    changes it needs, and its open questions. None of it is built.
+  - Power-cycling a hang (the backstop): agreed with Nick on 22 November 2026 and built, but off
+    (`X100_PLUG_BACKSTOP`). The plan is to turn it on after the current hang test. It needs, all done
+    by Nick: MQTT control on in the plug (its admin password; RPC over MQTT stays off), a broker login
+    for the bridge on port 1884 that may publish to `x100-plug/command/switch:0` only, and that login
+    in bridge.env. Then the checks in `docs/plug-backstop.md`, with the bridge stopped.
 - **Telling on from standby by the plug's watts (`X100_PLUG_STATE`), on since 17 November.** It tests
   the idea that the questions just after an "off" hang it (above).
   - The 25 W and 50 W bands hold against the starts and "off"s recorded from 8 to 16 November (its

@@ -55,13 +55,15 @@ def driver(srv):
     return Projector(TcpTransport("127.0.0.1", srv.port, timeout=0.5, min_gap=0), probe_timeout=0.15)
 
 
-def bridge(srv, expect=PowerState.OFF, **overrides):
-    settings = dict(poll_interval=30, fast_poll_interval=0.1, heartbeat_interval=600, defer_timeout=10,
-                    warmup_seconds=5, cooldown_seconds=0.6, settle_seconds=0.5, start_check_seconds=0.3,
-                    volume_step_delay=0, pending_check_interval=0.05, power_check_wait=0.15,
-                    standby_confirm_seconds=0.3, confirm_input_wait=0.3)
-    settings.update(overrides)
-    core = BridgeCore(Config(**settings), driver(srv), make_inputs(), publish=lambda doc: None)
+SCALED = dict(poll_interval=30, fast_poll_interval=0.1, heartbeat_interval=600, defer_timeout=10,
+              warmup_seconds=5, cooldown_seconds=0.6, settle_seconds=0.5, start_check_seconds=0.3,
+              volume_step_delay=0, pending_check_interval=0.05, power_check_wait=0.15,
+              standby_confirm_seconds=0.3, confirm_input_wait=0.3)
+
+
+def bridge(srv, expect=PowerState.OFF, plug_switch=None, **overrides):
+    core = BridgeCore(Config(**dict(SCALED, **overrides)), driver(srv), make_inputs(), publish=lambda doc: None,
+                      plug_switch=plug_switch)
     core.start()
     assert wait_for(lambda: core.state.connected and core.state.power == expect)
     return core
@@ -1381,9 +1383,9 @@ class FakePlug:
                 self.core.plug_status(powered, self.draw[power] if powered else 0.0, "")
 
 
-def watts_bridge(srv, expect=PowerState.OFF, **overrides):
+def watts_bridge(srv, expect=PowerState.OFF, plug_switch=None, **overrides):
     """A bridge going by the plug's watts. It reads the projector once as it starts, as it does without the plug."""
-    core = bridge(srv, expect, **dict(WATTS, **overrides))
+    core = bridge(srv, expect, plug_switch, **dict(WATTS, **overrides))
     plug = FakePlug(srv, core)
     assert wait_for(lambda: core._by_watts and core.state.power == expect, limit=2)
     return core, plug
@@ -1470,6 +1472,29 @@ def test_going_by_watts_a_start_by_its_remote_is_seen_and_holds_an_off(x100, cap
         assert wait_for(lambda: x100.state.log[heard:] == ["W 11 01 00"], limit=4)
         assert any(m.startswith("the projector is drawing more than in standby, and the bridge didn't start it")
                    for m in said(caplog))
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_after_an_on_it_didnt_take_the_hold_runs_from_its_remote_start(x100):
+    """An "off" soon after a start hung it once (MockState.hang_if_off_within). The hold after a start was timed from
+    the bridge's "on", even when that "on" didn't take and its remote started it later. An "off" waiting out the hold
+    could then go out too soon after the real start. Now the hold runs from the start its draw shows."""
+    core, plug = watts_bridge(x100, start_hold_seconds=3.0)
+    try:
+        x100.state.drop_power_on = 1  # it acknowledges the bridge's "on", but takes no notice
+        result = core.submit_and_wait(ON)
+        assert not result["ok"] and result["reason"] == "not_started"
+        time.sleep(1.7)
+        x100.state.hang_if_off_within = 2.9
+        with x100.state.lock:
+            x100.state.turn_on()  # its remote, 2 s after the bridge's "on"
+        started = time.monotonic()
+        off = core.submit_and_wait(OFF)
+        assert off["ok"] and off["deferred"]
+        assert wait_for(lambda: writes(x100, "W 11 01 00"), limit=6)
+        assert time.monotonic() - started >= 2.9 and not x100.state.hung
     finally:
         plug.stop()
         core.stop()
@@ -1609,3 +1634,395 @@ def test_going_by_watts_after_a_cut_a_standby_that_looks_on_still_gets_no_on(x10
     finally:
         plug.stop()
         core.stop()
+
+
+# ---------------------------------------------------------------------------- the backstop: a restart at the wall
+
+BACKSTOP = dict(WATTS, plug_backstop=True, plug_cause_seconds=1.0, backstop_off_seconds=0.3, backstop_calm_seconds=0.5,
+                backstop_switch_seconds=0.5, backstop_power_back_seconds=3.0)
+RESTART = [{"op": "restart"}]
+
+
+class FakeSwitch:
+    """The plug's MQTT control, on the simulator's mains: "off" cuts its power and "on" brings it back, as the real
+    plug does. FakePlug then reports it. ``works=False``: a plug that takes no notice (its MQTT control off, say).
+    ``after_power_back``: called as its power comes back (to hang it again, say)."""
+
+    def __init__(self, srv, works=True, signed_in=True, after_power_back=None):
+        self.srv, self.works, self.signed_in, self.after_power_back = srv, works, signed_in, after_power_back
+        self.sent = []
+
+    def can_switch(self):
+        return self.signed_in
+
+    def switch(self, on):
+        if not self.signed_in:
+            return False
+        self.sent.append("on" if on else "off")
+        if self.works:
+            with self.srv.state.lock:
+                if not on:
+                    self.srv.state.power_cut()
+                elif not self.srv.state.powered:
+                    self.srv.state.power_restored()
+                    if self.after_power_back is not None:
+                        self.after_power_back(self.srv.state)
+        return True
+
+
+def backstop_bridge(srv, switch=None, **overrides):
+    """A bridge with the backstop, going by the plug's watts, and settled: past the time its rules want the projector's
+    draw to have been at standby before they let it cut the power."""
+    switch = switch if switch is not None else FakeSwitch(srv)
+    core, plug = watts_bridge(srv, plug_switch=switch, **dict(BACKSTOP, **overrides))
+    time.sleep(0.6)
+    return core, plug, switch
+
+
+def hung(srv):
+    with srv.state.lock:
+        srv.state.hung = True  # in standby, it acknowledges "on" without starting
+
+
+def asked_while_booting(srv):
+    return [entry for entry in srv.state.log if entry.endswith("(booting)")]
+
+
+def test_a_restart_at_the_wall_hangs_it_if_its_asked_things_as_it_boots(x100):
+    """The hazard the backstop's wait is for: switched off and on at the wall, as the backstop does, it hangs again
+    if it's asked anything but the power query while it boots."""
+    booting_x100(x100)
+    hung(x100)
+    switch = FakeSwitch(x100)
+    switch.switch(False)
+    switch.switch(True)
+    assert not x100.state.hung  # the power-cycle cleared the hang...
+    reading = driver(x100).power_reading()  # ...but a reading at once, as a bridge without its wait would take
+    assert reading.state == PowerState.WARMING and x100.state.hung and asked_while_booting(x100)
+
+
+def test_the_backstop_restarts_a_hung_projector_at_the_wall_and_switches_it_on(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    booting_x100(x100)
+    core, plug, switch = backstop_bridge(x100)
+    try:
+        hung(x100)
+        result = core.submit_and_wait(ON)
+        assert result["ok"] and result["deferred"] and result["reason"] == "restarting"  # said at once
+        assert switch.sent == []  # not yet: its draw must show no change first (1 s here, 10 s on the Pi)
+        assert wait_for(lambda: switch.sent == ["off"], limit=3)
+        assert wait_for(lambda: switch.sent == ["off", "on"], limit=2)
+        assert wait_for(lambda: mock_power(x100) in (PowerState.WARMING, PowerState.ON), limit=5)
+        assert wait_for(lambda: core._bs_state == "", limit=2)
+        assert not x100.state.hung and asked_while_booting(x100) == []  # nothing asked until the wait was over
+        lines = said(caplog)
+        assert any(m.startswith("plug: no change in its draw in the 1 s after the bridge's 'on'") for m in lines)
+        assert any(m.startswith("backstop: the projector is hung (volume still answered 0 s after the bridge's 'on', "
+                                "and its draw showed no change by 1 s): switching its plug off for 0 s") for m in lines)
+        assert any(m.startswith("backstop: switching its plug back on") for m in lines)
+        assert any(m.startswith("backstop: done: the projector has started") for m in lines)
+        assert any(m.startswith("standby period: ") and "(the bridge's backstop switched its plug off and on)" in m
+                   and m.endswith("ended by the bridge's 'on': it started") for m in lines)
+        assert (core._today["restarts"], core._today["restarts that worked"]) == (1, 1)
+        core._summarise()
+        assert ", 1 restarts at the wall (1 worked)" in said(caplog)[-1]
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_asked_to_restart_it_in_standby_it_restarts_it_and_switches_it_on(x100):
+    booting_x100(x100)
+    core, plug, switch = backstop_bridge(x100)
+    try:
+        result = core.submit_and_wait(RESTART)
+        assert result["ok"] and result["deferred"] and result["reason"] == "restart"
+        assert switch.sent == ["off"]  # at once: there's no hang to wait for
+        assert wait_for(lambda: mock_power(x100) in (PowerState.WARMING, PowerState.ON), limit=5)
+        assert switch.sent == ["off", "on"] and asked_while_booting(x100) == [] and not x100.state.hung
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_the_plug_can_cut_a_projector_thats_on_so_the_backstop_wont(x100):
+    """The plug's "off" reaches the projector whatever it's doing: mid-film, it's the wall switch. So the backstop
+    never cuts it while it draws more than standby, or just after a start or an "off" its draw showed."""
+    switch = FakeSwitch(x100)
+    core, plug, _ = backstop_bridge(x100, switch)
+    try:
+        started_and_settled(core, x100)
+        refused = core.submit_and_wait(RESTART)
+        assert not refused["ok"] and refused["reason"] == "restart_on" and "152 W" in refused["message"]
+        assert switch.sent == [] and mock_power(x100) == PowerState.ON
+        time.sleep(0.5)
+        assert core.submit_and_wait(OFF)["ok"]
+        assert wait_for(lambda: core._plug_off_at is not None, limit=2)  # its draw showed the "off"
+        refused = core.submit_and_wait(RESTART)
+        assert not refused["ok"] and refused["reason"] == "restart_wait" and "went off" in refused["message"]
+        assert switch.sent == []
+        time.sleep(1.0)  # past the hold after the "off" (1 s here, 2 minutes on the Pi)
+        assert core.submit_and_wait(RESTART)["reason"] == "restart"
+        assert switch.sent == ["off"]
+        with x100.state.lock:
+            x100.state.power_cut()  # and what it did: the projector lost its power, as it would have mid-film
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_an_on_its_draw_reacted_to_isnt_taken_for_a_hang(x100, caplog):
+    """Volume still answering 2 s after "on" isn't enough: a start, or a press of its remote, shows in its draw within
+    seconds. If the draw changes before the cut, the backstop leaves it alone."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core, plug, switch = backstop_bridge(x100)
+    try:
+        hung(x100)
+        plug.draw[PowerState.OFF] = 7.5  # the dip as it starts, though its volume still answers
+        assert core.submit_and_wait(ON)["reason"] == "restarting"
+        assert wait_for(lambda: core._bs_state == "", limit=3)
+        time.sleep(1.2)  # past when it would have cut
+        assert switch.sent == []
+        assert any(m.startswith("backstop: its draw changed after the bridge's 'on' after all: not cutting its power")
+                   for m in said(caplog))
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_a_hang_just_after_an_off_isnt_cut(x100):
+    core, plug, switch = backstop_bridge(x100)
+    try:
+        started_and_settled(core, x100)
+        with x100.state.lock:
+            x100.state.turn_off()  # its remote
+        assert wait_for(lambda: core._plug_off_at is not None and core.state.power == PowerState.OFF, limit=3)
+        hung(x100)
+        result = core.submit_and_wait(ON)
+        assert not result["ok"] and result["reason"] == "not_started"  # today's answer: no restart this soon
+        time.sleep(1.5)
+        assert switch.sent == []
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_without_fresh_readings_from_the_plug_a_hang_isnt_cut(x100):
+    """Without readings, its draw can't show whether it reacted to the "on", or whether it's on."""
+    core, plug, switch = backstop_bridge(x100)
+    try:
+        plug.sending.clear()
+        assert wait_for(lambda: not core._watts_fresh(), limit=3)
+        hung(x100)
+        result = core.submit_and_wait(ON)
+        assert not result["ok"] and result["reason"] == "not_started"
+        refused = core.submit_and_wait(RESTART)
+        assert not refused["ok"] and refused["reason"] == "restart_unable"
+        time.sleep(1.5)
+        assert switch.sent == []
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_readings_that_stop_before_the_cut_call_it_off(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    core, plug, switch = backstop_bridge(x100)
+    try:
+        hung(x100)
+        assert core.submit_and_wait(ON)["reason"] == "restarting"
+        plug.sending.clear()  # 1 s without one counts as stale here (3 minutes on the Pi)
+        assert wait_for(lambda: core._bs_state == "", limit=3)
+        assert switch.sent == []
+        assert any(m.startswith("backstop: not cutting its power after all: there are no recent readings from the plug")
+                   for m in said(caplog))
+        plug.sending.set()
+        assert wait_for(core._watts_fresh, limit=2)
+        told = core.submit_and_wait(OFF)  # the next command hears of it
+        assert told["ok"] and told["reason"] == "restart_unable"
+        time.sleep(1.0)  # past the hold after the bridge's "on" (1 s here, 2 minutes on the Pi)
+        assert core.submit_and_wait(ON)["reason"] == "restarting"  # with readings again, this hang may be cut
+        assert wait_for(lambda: switch.sent == ["off"], limit=3)
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_a_projector_that_hangs_again_after_a_restart_is_restarted_only_once(x100, caplog):
+    """The hazard: a projector whose hang outlasts a power-cycle would be cut again at every "on". The backstop cuts
+    it once per hang: if the "on" after the restart hangs too, it stops, and says so."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    switch = FakeSwitch(x100, after_power_back=lambda state: setattr(state, "hung", True))
+    core, plug, _ = backstop_bridge(x100, switch)
+    try:
+        hung(x100)
+        assert core.submit_and_wait(ON)["reason"] == "restarting"
+        assert wait_for(lambda: switch.sent == ["off", "on"], limit=3)
+        assert wait_for(lambda: core._bs_state == "" and core._bs_paused != "", limit=5)  # its "on" hung it again
+        assert x100.state.hung and writes(x100, "W 11 00 00")  # the "on" went, after the wait
+        assert any(m.startswith("backstop: the 'on' after the restart didn't start it either") for m in said(caplog))
+        first = core.submit_and_wait(ON)  # within 2 minutes of its "on" (1 s here): no "on" is sent, but the news
+        assert not first["ok"] and first["reason"] == "restart_failed"
+        time.sleep(1.0)  # past that hold
+        again = core.submit_and_wait(ON)
+        assert not again["ok"] and again["reason"] == "hung_again"
+        time.sleep(1.5)
+        assert switch.sent == ["off", "on"]  # no second restart by itself
+        assert core.submit_and_wait(RESTART)["reason"] == "restart"  # asking still works
+        assert wait_for(lambda: switch.sent == ["off", "on", "off", "on"], limit=3)
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_the_news_of_a_restart_that_didnt_help_comes_with_the_next_command(x100):
+    switch = FakeSwitch(x100, after_power_back=lambda state: setattr(state, "hung", True))
+    core, plug, _ = backstop_bridge(x100, switch)
+    try:
+        hung(x100)
+        assert core.submit_and_wait(ON)["reason"] == "restarting"
+        assert wait_for(lambda: core._bs_state == "" and core._bs_paused != "", limit=6)
+        told = core.submit_and_wait(OFF)  # ok: it's in standby. But the restart didn't help
+        assert told["ok"] and told["reason"] == "restart_failed"
+        assert "reason" not in core.submit_and_wait(OFF)  # once
+        with x100.state.lock:
+            x100.state.power_cut()
+            x100.state.power_restored()  # its remote, say, after a power-cycle at the wall
+            x100.state.turn_on()
+        # it has started: it may restart it by itself again. Its draw shows that once its boot is over: 5 s after
+        # its power came back, which is all the plug's readings can tell.
+        assert wait_for(lambda: core._bs_paused == "", limit=8)
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_after_a_restart_a_standby_that_looks_on_gets_no_on(x100, caplog):
+    """Whether its standby that answers like on takes a serial "on" isn't known, so after a restart the bridge reads
+    it once, and sends "on" only from an ordinary standby."""
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    x100.state.cold_standby_after_power_up = True
+    core, plug, switch = backstop_bridge(x100)
+    try:
+        hung(x100)
+        assert core.submit_and_wait(ON)["reason"] == "restarting"
+        assert wait_for(lambda: switch.sent == ["off", "on"], limit=3)
+        heard = len(x100.state.log)
+        assert wait_for(lambda: core._bs_state == "", limit=5)
+        assert x100.state.cold and not writes(x100, "W 11 00 00")[1:]  # only the first "on", before the restart
+        assert all(not e.startswith("W 11 00") for e in x100.state.log[heard:])
+        assert any(m.startswith("backstop: no 'on': after the restart its standby answers as if it were on")
+                   for m in said(caplog))
+        refused = core.submit_and_wait(ON)
+        assert not refused["ok"] and refused["reason"] == "looks_on"
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_a_plug_that_doesnt_switch_off_when_told_is_given_up_on(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    switch = FakeSwitch(x100, works=False)  # its MQTT control off, say, or the login may not publish
+    core, plug, _ = backstop_bridge(x100, switch)
+    try:
+        hung(x100)
+        assert core.submit_and_wait(ON)["reason"] == "restarting"
+        assert wait_for(lambda: switch.sent == ["off"], limit=3)
+        assert wait_for(lambda: core._bs_state == "", limit=2)  # after 0.5 s here (10 s on the Pi)
+        assert any(m.startswith("backstop: gave up: the plug didn't switch off") for m in said(caplog))
+        told = core.submit_and_wait(ON)  # still hung: and now it says why there was no restart
+        assert not told["ok"] and told["reason"] == "restart_unable"
+        time.sleep(1.0)  # past the hold after that "on" (1 s here, 2 minutes on the Pi)
+        again = core.submit_and_wait(ON)
+        assert not again["ok"] and again["reason"] == "hung_again"  # and it doesn't promise one again
+        assert switch.sent == ["off"]
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_while_it_restarts_commands_wait_and_off_means_no_on_afterwards(x100, caplog):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    booting_x100(x100)
+    core, plug, switch = backstop_bridge(x100)
+    try:
+        hung(x100)
+        assert core.submit_and_wait(ON)["reason"] == "restarting"
+        assert wait_for(lambda: core._bs_state == "off", limit=3)  # its power is off
+        heard = len(x100.state.log)
+        busy = core.submit_and_wait(ON)
+        assert not busy["ok"] and busy["reason"] == "restart_busy"
+        assert core.submit_and_wait(RESTART)["reason"] == "restart_busy"
+        off = core.submit_and_wait(OFF)
+        assert off["ok"] and not off["deferred"] and "reason" not in off
+        assert wait_for(lambda: core._bs_state == "", limit=5)
+        time.sleep(0.3)
+        assert asked_while_booting(x100) == [] and mock_power(x100) == PowerState.OFF
+        assert not any(e.startswith("W 11 00") for e in x100.state.log[heard:])  # no "on", after the wait or before
+        assert any(m.startswith("backstop: done: its power is back, and it has had time to boot. As 'off' was asked")
+                   for m in said(caplog))
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_without_the_backstop_a_hang_is_left_as_it_was(x100):
+    """X100_PLUG_BACKSTOP is off unless it's set: a hang gets today's answer, and "restart" can't be done."""
+    switch = FakeSwitch(x100)
+    core, plug, _ = backstop_bridge(x100, switch, plug_backstop=False)
+    try:
+        hung(x100)
+        result = core.submit_and_wait(ON)
+        assert not result["ok"] and result["reason"] == "not_started"
+        refused = core.submit_and_wait(RESTART)
+        assert not refused["ok"] and refused["reason"] == "restart_unable"
+        time.sleep(1.5)
+        assert switch.sent == [] and x100.state.hung
+    finally:
+        plug.stop()
+        core.stop()
+
+
+def test_a_bridge_restarted_as_the_projector_boots_after_a_restart_used_to_hang_it(x100):
+    """The hazard: a bridge that starts afresh while the projector boots reads it at once, which hangs it."""
+    booting_x100(x100)
+    core, plug, switch = backstop_bridge(x100)
+    try:
+        hung(x100)
+        assert core.submit_and_wait(ON)["reason"] == "restarting"
+        assert wait_for(lambda: core._bs_state == "booting", limit=3)  # its power has just come back
+    finally:
+        plug.stop()
+        core.stop()  # say it's restarted for a new build, or after a crash
+    fresh = bridge(x100, expect=PowerState.WARMING, **WATTS)  # it knows nothing of the restart
+    fresh.stop()
+    assert x100.state.hung and asked_while_booting(x100)
+
+
+@pytest.mark.parametrize("stopped_while", ["off", "booting"])
+def test_a_bridge_restarted_in_the_middle_of_a_restart_finishes_it_safely(x100, tmp_path, caplog, stopped_while):
+    caplog.set_level(logging.INFO, logger="x100.bridge")
+    booting_x100(x100)
+    core, plug, switch = backstop_bridge(x100, state_dir=str(tmp_path))
+    try:
+        hung(x100)
+        assert core.submit_and_wait(ON)["reason"] == "restarting"
+        assert wait_for(lambda: core._bs_state == stopped_while, limit=3)
+    finally:
+        plug.stop()
+        core.stop()
+    assert (tmp_path / "backstop.json").exists()
+    again = BridgeCore(Config(**dict(SCALED, **BACKSTOP, state_dir=str(tmp_path))), driver(x100), make_inputs(),
+                       publish=lambda doc: None, plug_switch=switch)
+    again.start()
+    plug = FakePlug(x100, again)
+    try:
+        assert wait_for(lambda: mock_power(x100) in (PowerState.WARMING, PowerState.ON), limit=6)
+        assert not x100.state.hung and asked_while_booting(x100) == []
+        assert switch.sent == ["off", "on"]  # back on once, by whichever bridge
+        assert wait_for(lambda: again._bs_state == "" and not (tmp_path / "backstop.json").exists(), limit=2)
+        assert any(m.startswith("backstop: the bridge was restarting the projector at the wall when it stopped")
+                   for m in said(caplog))
+    finally:
+        plug.stop()
+        again.stop()
