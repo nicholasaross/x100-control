@@ -341,18 +341,22 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
 
       scp ../x100-control.zip x100-controller@x100-pi.local:
       ssh x100-controller@x100-pi.local
-      sudo rm -rf x100-control && unzip -q x100-control.zip && cd x100-control && sudo deploy/install.sh
+      rm -rf x100-control && unzip -q x100-control.zip && cd x100-control && sudo deploy/install.sh
 
-  - It's `sudo rm`, because install.sh leaves a root-owned cache file in the unpacked folder (see
-    the open items).
+  - Builds up to 3dc308bf left a root-owned cache file in the unpacked folder: their package check
+    ran Python as root from it, which also imported the unpacked copy, not the installed one. So the
+    first install after them needs `sudo rm -rf x100-control`; the Pi's folder has that file now.
+    install.sh now runs its Python with `-P` and clears any root-owned cache it finds there, so a
+    plain `rm` works from then on.
 
   - `install.sh` keeps bridge.env, listener.env, config/, models and clips.
   - It ends by printing the installed build ID. Check that it matches the one make_release printed.
   - Older zips from before the move may still be in Nick's home folder. Never send those.
 - **Install over SSH:** Nick's SSH key is on the Pi, so `scp` and read-only `ssh` commands work from
   his Mac. sudo there needs his password (`sudo -n true` fails). So run the install in a tab of his
-  Terminal panel, as `ssh -t x100-controller@x100-pi.local 'sudo rm -rf x100-control && unzip -q
-  x100-control.zip && cd x100-control && sudo deploy/install.sh'`, and he types the password there.
+  Terminal panel, as `ssh -t x100-controller@x100-pi.local 'rm -rf x100-control && unzip -q
+  x100-control.zip && cd x100-control && sudo deploy/install.sh'` (`sudo rm` the first time, above),
+  and he types the password there.
   It ends with `Installed: … (build <id>, …)` and `Connection to x100-pi.local closed.`
 - **Tags so far:** `build-94bd0861`, `build-e776ca5b`, `build-df034892`, `build-91c5549f`,
   `build-bbc37ab4`, `build-2d0dd24e`, and `build-3dc308bf`, the build installed since 17:34 on
@@ -434,9 +438,6 @@ on 3.11 alone, and write code for it. tests/README.md has the details, including
   - Before it, from 20:11 on 8 November to 16:59 on 17 November, a temporary `mosquitto_sub`
     recorded the same to `~/plug-capture.log` (11.6 MB), the source of most of November's findings.
     It was stopped with Nick's OK. Keep the log: delete it only with his OK.
-- **install.sh leaves a root-owned cache file in the unpacked release folder.** Its package check
-  runs Python as root from that folder, which also means the check imports the unpacked copy, not
-  the installed one. Until that's fixed, the install step uses `sudo rm`.
 - **The bridge has read the plug since 17 November.** It sees the plug's off and on, its restarts,
   and the projector being unplugged from it, so a cut between hourly checks is no longer missed.
   - Why: on 7 November it hung in standby, and Nick power-cycled it with the plug's button, off for

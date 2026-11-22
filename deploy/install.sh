@@ -58,9 +58,13 @@ if [ ! -f "$SRC/pyproject.toml" ] || [ ! -d "$SRC/x100_listener" ]; then
   die "run it from the unpacked x100-control folder"
 fi
 
+# Python runs here as root, from the unpacked release, so always with -P: without it, the current
+# folder comes first on the import path, and an import then picks up the unpacked copy rather than
+# what's installed, and writes a root-owned cache into the folder, which a plain rm can't remove.
+
 # KEY=VALUE in an env file: replaces the first KEY= line, commented or not, else appends.
 set_env() {
-  "$PREFIX/.venv/bin/python" - "$1" "$2" "$3" <<'PY'
+  "$PREFIX/.venv/bin/python" -P - "$1" "$2" "$3" <<'PY'
 import re, sys
 path, key, value = sys.argv[1:4]
 lines = open(path).read().splitlines()
@@ -132,7 +136,7 @@ rm -rf "$PREFIX/build" "$PREFIX"/*.egg-info
 checks="import serial, x100_bridge"
 [ "$listener" -eq 1 ] && checks="$checks, openwakeword, sherpa_onnx, sounddevice"
 [ "$bridge" -eq 1 ] && checks="$checks, paho.mqtt"   # the smart plug, and the Alexa link
-"$PREFIX/.venv/bin/python" -c "$checks; print('packages ok')"
+"$PREFIX/.venv/bin/python" -P -c "$checks; print('packages ok')"   # what's installed, not the copy here
 
 if [ "$listener" -eq 1 ]; then
   step "Models"
@@ -177,7 +181,7 @@ if [ "$bridge" -eq 1 ]; then
     else
       set_env "$env_file" LOCAL_API_BIND 0.0.0.0:8661     # a listener elsewhere on the LAN
     fi
-    set_env "$env_file" LOCAL_API_TOKEN "$("$PREFIX/.venv/bin/python" -c 'import secrets; print(secrets.token_hex(16))')"
+    set_env "$env_file" LOCAL_API_TOKEN "$("$PREFIX/.venv/bin/python" -P -c 'import secrets; print(secrets.token_hex(16))')"
     echo "created $env_file"
   fi
   # Readable by the services, not by everyone: it holds the API token.
@@ -241,6 +245,12 @@ fi
 if [ "$bridge" -eq 1 ] && [ -n "$(get_env "$PREFIX/bridge.env" AWS_IOT_ENDPOINT)" ] &&
   [ ! -f /etc/systemd/system/x100-bridge.service.d/alexa.conf ]; then
   echo "warning: AWS_IOT_ENDPOINT is set but the bridge is firewalled to your network; re-run with --alexa"
+fi
+
+# Leave nothing of root's in the unpacked folder, so a plain rm removes it: a cache left by an
+# older install.sh run in the same folder, say.
+if [ "$SRC" != "$PREFIX" ]; then
+  find "$SRC" -name __pycache__ -type d -user root -prune -exec rm -rf {} +
 fi
 
 echo

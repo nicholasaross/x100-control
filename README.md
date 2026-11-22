@@ -103,10 +103,16 @@ That installs everything in `/opt/x100-control` and needs no editing afterwards:
 * `bridge.env`, with the serial adapter found automatically (its `/dev/serial/by-id/…` name, which
   survives reboots) and the bridge's API kept to the Pi itself;
 * `listener.env`, pointed at that bridge, with a freshly generated token that the two share;
-* two systemd services, `x100-bridge` and `x100-listener`, running as an unprivileged `x100` user.
+* two systemd services, `x100-bridge` and `x100-listener`, running as an unprivileged `x100` user,
+  and a third, `x100-plug-recorder`, which records a smart plug's readings if you have one.
 
-Re-run it to upgrade; it keeps your settings and restarts both services, so the new code is running
-when it finishes. It ends by printing the release it installed, and you can check that any time:
+To upgrade, copy the new zip over in the same way, then run
+`rm -rf x100-control && unzip x100-control.zip && cd x100-control && sudo deploy/install.sh`.
+It keeps your settings and restarts the services, so the new code is running when it finishes.
+Releases up to build 3dc308bf left a file of root's in that folder: if `rm` says "Permission
+denied", use `sudo rm -rf x100-control` this once.
+
+The install ends by printing the release it installed, and you can check that any time:
 
 ```bash
 /opt/x100-control/.venv/bin/x100ctl --version     # e.g. x100-control 2.0.1 (build 3f9c2a1b, 2026-10-12)
