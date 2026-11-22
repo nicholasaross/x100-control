@@ -283,6 +283,12 @@ the wall.
 - **Chimes:** two rising notes for ok, two level notes for queued (accepted, but waiting until the
   projector is ready, such as an "off" in the 2 minutes after a start), two falling notes for fail,
   and one low note when no command followed "Hey Jarvis".
+  - The low note is off on Nick's Pi since 22 November (`UNCLEAR_CHIME=false` in listener.env; the old
+    file is kept beside it). From 2 to 22 November "Hey Jarvis" fired 1,022 times, and only 35 were
+    followed by a command: about 50 false wakes a day, from voices in the room, as often with the
+    projector off as on. The note helped only 4 times, when a real command wasn't caught. Without it,
+    a missing "ok" chime says "say it again".
+  - Raising `WAKE_THRESHOLD` (0.4) would miss Nick: 8 of his 35 real wakes scored under 0.5.
 - **Spoken replies (`replies.py`) stand in for the level and falling notes.** Nick chose the voice on
   7 November 2026: Piper's semaine voice, speaker 2 ("Obadiah"), 3.5 semitones lower at the same
   pace, with a little growl and gravel ("gruff"; the "sillier" 6.5 semitones was too much).
